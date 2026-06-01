@@ -1,0 +1,138 @@
+import importlib.util
+import json
+from pathlib import Path
+
+
+def _load_sync_opencode_agents():
+    root = Path(__file__).resolve().parents[1]
+    script_path = root / "scripts" / "sync_opencode_agents.py"
+    spec = importlib.util.spec_from_file_location("sync_opencode_agents", script_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_collect_opencode_models_keeps_configured_models_selectable(monkeypatch):
+    sync_opencode_agents = _load_sync_opencode_agents()
+    monkeypatch.delenv("OPENCODE_MODEL", raising=False)
+    monkeypatch.delenv("OPENCODE_DEFAULT_MODEL", raising=False)
+    monkeypatch.setattr(
+        sync_opencode_agents,
+        "discover_opencode_models",
+        lambda: [{"id": "opencode/mimo-v2.5-free", "label": "Mimo V2.5 Free", "provider": "OpenCode"}],
+    )
+
+    cfg = {
+        "model": "opencode/deepseek-v4-flash-free",
+        "agent": {"taizi": {"model": "github-copilot/gpt-5.3-codex"}},
+    }
+    existing = [{"id": "anthropic/claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "provider": "Anthropic"}]
+
+    models = sync_opencode_agents.collect_opencode_models(
+        cfg,
+        existing,
+        "opencode/deepseek-v4-flash-free",
+    )
+    ids = [m["id"] for m in models]
+
+    assert ids[0] == "opencode/deepseek-v4-flash-free"
+    assert "github-copilot/gpt-5.3-codex" in ids
+    assert "opencode/mimo-v2.5-free" in ids
+    assert "anthropic/claude-sonnet-4-6" in ids
+    assert len(ids) == len(set(ids))
+    assert models[0]["provider"] == "OpenCode"
+
+
+def test_sync_dashboard_config_injects_opencode_known_models(tmp_path, monkeypatch):
+    sync_opencode_agents = _load_sync_opencode_agents()
+    monkeypatch.delenv("OPENCODE_MODEL", raising=False)
+    monkeypatch.delenv("OPENCODE_DEFAULT_MODEL", raising=False)
+    monkeypatch.setattr(sync_opencode_agents, "BASE", tmp_path)
+    monkeypatch.setattr(sync_opencode_agents, "DATA", tmp_path / "data")
+    monkeypatch.setattr(sync_opencode_agents, "PROMPTS_DIR", tmp_path / ".opencode" / "prompts")
+    monkeypatch.setattr(sync_opencode_agents, "discover_opencode_models", lambda: [])
+
+    cfg = {
+        "model": "opencode/deepseek-v4-flash-free",
+        "agent": {"taizi": {"model": "opencode/big-pickle"}},
+    }
+
+    sync_opencode_agents.sync_dashboard_config(cfg)
+
+    out = json.loads((tmp_path / "data" / "agent_config.json").read_text(encoding="utf-8"))
+    ids = [m["id"] for m in out["knownModels"]]
+    taizi = next(agent for agent in out["agents"] if agent["id"] == "taizi")
+
+    assert out["runtime"] == "opencode"
+    assert ids[:2] == ["opencode/deepseek-v4-flash-free", "opencode/big-pickle"]
+    assert taizi["model"] == "opencode/big-pickle"
+
+
+def test_sync_opencode_config_recovers_logged_model_choice(tmp_path, monkeypatch):
+    sync_opencode_agents = _load_sync_opencode_agents()
+    monkeypatch.delenv("OPENCODE_MODEL", raising=False)
+    monkeypatch.delenv("OPENCODE_DEFAULT_MODEL", raising=False)
+    monkeypatch.setattr(sync_opencode_agents, "BASE", tmp_path)
+    monkeypatch.setattr(sync_opencode_agents, "DATA", tmp_path / "data")
+    monkeypatch.setattr(sync_opencode_agents, "OPENCODE_CFG", tmp_path / "opencode.json")
+
+    (tmp_path / "data").mkdir()
+    (tmp_path / "opencode.json").write_text(
+        json.dumps({"model": "opencode/deepseek-v4-flash-free", "agent": {"taizi": {}}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "data" / "agent_config.json").write_text(
+        json.dumps({"agents": [{"id": "taizi", "model": "opencode/deepseek-v4-flash-free"}]}),
+        encoding="utf-8",
+    )
+    (tmp_path / "data" / "model_change_log.json").write_text(
+        json.dumps([
+            {
+                "runtime": "opencode",
+                "agentId": "taizi",
+                "oldModel": "opencode/deepseek-v4-flash-free",
+                "newModel": "github-copilot/gemini-3.5-flash",
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    cfg = sync_opencode_agents.sync_opencode_config()
+
+    assert cfg["agent"]["taizi"]["model"] == "github-copilot/gemini-3.5-flash"
+
+
+def test_sync_dashboard_config_recovers_logged_model_choice(tmp_path, monkeypatch):
+    sync_opencode_agents = _load_sync_opencode_agents()
+    monkeypatch.delenv("OPENCODE_MODEL", raising=False)
+    monkeypatch.delenv("OPENCODE_DEFAULT_MODEL", raising=False)
+    monkeypatch.setattr(sync_opencode_agents, "BASE", tmp_path)
+    monkeypatch.setattr(sync_opencode_agents, "DATA", tmp_path / "data")
+    monkeypatch.setattr(sync_opencode_agents, "PROMPTS_DIR", tmp_path / ".opencode" / "prompts")
+    monkeypatch.setattr(sync_opencode_agents, "discover_opencode_models", lambda: [])
+
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "agent_config.json").write_text(
+        json.dumps({"knownModels": [], "agents": [{"id": "zhongshu", "model": "opencode/deepseek-v4-flash-free"}]}),
+        encoding="utf-8",
+    )
+    (tmp_path / "data" / "model_change_log.json").write_text(
+        json.dumps([
+            {
+                "runtime": "opencode",
+                "agentId": "zhongshu",
+                "oldModel": "opencode/deepseek-v4-flash-free",
+                "newModel": "github-copilot/gpt-4o",
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    sync_opencode_agents.sync_dashboard_config({"model": "opencode/deepseek-v4-flash-free", "agent": {"zhongshu": {}}})
+
+    out = json.loads((tmp_path / "data" / "agent_config.json").read_text(encoding="utf-8"))
+    zhongshu = next(agent for agent in out["agents"] if agent["id"] == "zhongshu")
+    ids = [m["id"] for m in out["knownModels"]]
+
+    assert zhongshu["model"] == "github-copilot/gpt-4o"
+    assert "github-copilot/gpt-4o" in ids

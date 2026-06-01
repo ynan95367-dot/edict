@@ -1,0 +1,61 @@
+# Runtime data (machine-specific)
+data/live_status.json
+data/agent_config.json
+data/model_change_log.json
+data/pending_model_changes.json
+data/last_model_change_result.json
+data/sync_status.json
+data/tasks_source.json
+data/tasks.json
+data/bitable_source.json
+data/mission_control_tasks.json
+
+# Logs
+*.log
+/tmp/
+.pids/
+
+# Environment
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS
+.DS_Store
+*.swp
+
+# Node.js
+node_modules/
+.opencode/node_modules/
+.opencode/package.json
+.opencode/package-lock.json
+edict/frontend/node_modules/
+edict/frontend/dist/
+dashboard/dist/
+# dashboard/server.py serves this checked-in production build.
+!dashboard/dist/
+!dashboard/dist/index.html
+!dashboard/dist/assets/
+!dashboard/dist/assets/**
+*.tsbuildinfo
+
+# Vite cache
+.vite/
+
+# IDE
+.vscode/
+
+# Backups
+*.bak*
+data
+
+# Local dev/test scripts
+_*.py
+
+# Generated docs
+*.docx
+*.pdf
