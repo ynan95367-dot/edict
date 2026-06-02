@@ -72,6 +72,21 @@ const DISPATCH_LABELS: Record<string, { label: string; tone: 'ok' | 'warn' | 'er
   'opencode-session-stale': { label: 'OpenCode 会话失效', tone: 'warn' },
 };
 
+const SCHED_ACTION_LABELS: Record<string, string> = {
+  scan: '立即扫描',
+  retry: '重试派发',
+  escalate: '升级协调',
+  rollback: '回滚',
+};
+
+type SchedulerActionFeedback = {
+  action: string;
+  label: string;
+  detail: string;
+  tone: 'ok' | 'warn' | 'err' | 'idle';
+  pending?: boolean;
+};
+
 function dispatchInfo(sched?: SchedulerInfo | null) {
   const raw = sched?.lastDispatchStatus || 'idle';
   return DISPATCH_LABELS[raw] || { label: raw, tone: 'warn' as const };
@@ -142,6 +157,7 @@ export default function TaskModal() {
   const [schedData, setSchedData] = useState<SchedulerStateData | null>(null);
   const [codingData, setCodingData] = useState<CodingSessionData | null>(null);
   const [sourcePreview, setSourcePreview] = useState<SourceFileResult | null>(null);
+  const [schedActionFeedback, setSchedActionFeedback] = useState<SchedulerActionFeedback | null>(null);
   const laTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -232,8 +248,12 @@ export default function TaskModal() {
   }, [fetchCodingSession, loadAll, toast]);
 
   useEffect(() => {
-    if (!modalTaskId || !task) return;
     setSourcePreview(null);
+    setSchedActionFeedback(null);
+  }, [modalTaskId]);
+
+  useEffect(() => {
+    if (!modalTaskId || !task) return;
     fetchActivity();
     fetchSched();
     fetchCodingSession();
@@ -324,15 +344,32 @@ export default function TaskModal() {
     }
   };
 
-  const doSchedAction = async (action: string, reasonOverride?: string) => {
+  const doSchedAction = async (action: string, reasonOverride?: string, source: 'manual' | 'diagnosis' = 'manual') => {
     if (!['scan', 'retry', 'escalate', 'rollback'].includes(action)) return;
+    const actionLabel = SCHED_ACTION_LABELS[action] || '处理';
+    const labelPrefix = source === 'diagnosis' ? '按诊断建议' : '';
     if (action === 'scan') {
+      setSchedActionFeedback({
+        action,
+        label: `${labelPrefix}${actionLabel}`,
+        detail: '正在扫描运行证据和派发队列...',
+        tone: 'warn',
+        pending: true,
+      });
       try {
         const r = await api.schedulerScan(180);
-        if (r.ok) toast(`🔍 扫描完成：${r.count || 0} 个动作`, 'ok');
-        else toast(r.error || '扫描失败', 'err');
+        if (r.ok) {
+          const detail = `扫描完成，识别 ${r.count || 0} 个动作`;
+          setSchedActionFeedback({ action, label: actionLabel, detail, tone: 'ok' });
+          toast(detail, 'ok');
+        } else {
+          const detail = r.error || '扫描失败';
+          setSchedActionFeedback({ action, label: `${actionLabel}失败`, detail, tone: 'err' });
+          toast(detail, 'err');
+        }
         fetchSched();
       } catch {
+        setSchedActionFeedback({ action, label: `${actionLabel}失败`, detail: '服务器连接失败', tone: 'err' });
         toast('服务器连接失败', 'err');
       }
       return;
@@ -340,6 +377,13 @@ export default function TaskModal() {
     const labels: Record<string, string> = { retry: '重试', escalate: '升级', rollback: '回滚' };
     const reason = reasonOverride ?? prompt(`请输入${labels[action]}原因（可留空）：`);
     if (reason === null || reason === undefined) return;
+    setSchedActionFeedback({
+      action,
+      label: `${labelPrefix}${actionLabel}`,
+      detail: reason ? `原因：${reason}` : '正在提交调度动作...',
+      tone: 'warn',
+      pending: true,
+    });
     const handlers: Record<string, (id: string, r: string) => Promise<{ ok: boolean; message?: string; error?: string }>> = {
       retry: api.schedulerRetry,
       escalate: api.schedulerEscalate,
@@ -347,11 +391,19 @@ export default function TaskModal() {
     };
     try {
       const r = await handlers[action](task.id, reason);
-      if (r.ok) toast(r.message || '操作成功', 'ok');
-      else toast(r.error || '操作失败', 'err');
+      if (r.ok) {
+        const detail = r.message || '操作成功';
+        setSchedActionFeedback({ action, label: actionLabel, detail, tone: 'ok' });
+        toast(detail, 'ok');
+      } else {
+        const detail = r.error || '操作失败';
+        setSchedActionFeedback({ action, label: `${actionLabel}失败`, detail, tone: 'err' });
+        toast(detail, 'err');
+      }
       fetchSched();
       loadAll();
     } catch {
+      setSchedActionFeedback({ action, label: `${actionLabel}失败`, detail: '服务器连接失败', tone: 'err' });
       toast('服务器连接失败', 'err');
     }
   };
@@ -468,10 +520,20 @@ export default function TaskModal() {
                 <span>{dispatchDiagnosis.detail || '等待调度信息'}</span>
                 {dispatchDiagnosis.nextAction && <em>{dispatchDiagnosis.nextAction}</em>}
                 {canRunDiagnosisAction && (
-                  <button type="button" onClick={() => doSchedAction(diagnosisAction || '', dispatchDiagnosis.actionReason || dispatchDiagnosis.detail || dispatchDiagnosis.label || '')}>
+                  <button
+                    type="button"
+                    disabled={!!schedActionFeedback?.pending}
+                    onClick={() => doSchedAction(diagnosisAction || '', dispatchDiagnosis.actionReason || dispatchDiagnosis.detail || dispatchDiagnosis.label || '', 'diagnosis')}
+                  >
                     {dispatchDiagnosis.actionLabel || '处理'}
                   </button>
                 )}
+              </div>
+            )}
+            {schedActionFeedback && (
+              <div className={`run-action-feedback ${schedActionFeedback.tone}${schedActionFeedback.pending ? ' pending' : ''}`} role="status">
+                <b>{schedActionFeedback.label}</b>
+                <span>{schedActionFeedback.detail}</span>
               </div>
             )}
             {sched && (
@@ -484,10 +546,10 @@ export default function TaskModal() {
               </div>
             )}
             <div className="sched-actions compact">
-              <button className="sched-btn" onClick={() => doSchedAction('scan')}><Search size={13} />立即扫描</button>
-              <button className="sched-btn" onClick={() => doSchedAction('retry')}><RotateCcw size={13} />重试派发</button>
-              <button className="sched-btn warn" onClick={() => doSchedAction('escalate')}><ArrowUpCircle size={13} />升级协调</button>
-              <button className="sched-btn danger" onClick={() => doSchedAction('rollback')}><Undo2 size={13} />回滚</button>
+              <button className="sched-btn" disabled={!!schedActionFeedback?.pending} onClick={() => doSchedAction('scan')}><Search size={13} />立即扫描</button>
+              <button className="sched-btn" disabled={!!schedActionFeedback?.pending} onClick={() => doSchedAction('retry')}><RotateCcw size={13} />重试派发</button>
+              <button className="sched-btn warn" disabled={!!schedActionFeedback?.pending} onClick={() => doSchedAction('escalate')}><ArrowUpCircle size={13} />升级协调</button>
+              <button className="sched-btn danger" disabled={!!schedActionFeedback?.pending} onClick={() => doSchedAction('rollback')}><Undo2 size={13} />回滚</button>
             </div>
           </div>
 
