@@ -438,50 +438,70 @@ export default function TaskModal() {
   const dispatchDiagnosis = schedData?.dispatchDiagnosis;
   const diagnosisAction = dispatchDiagnosis?.action;
   const canRunDiagnosisAction = !!diagnosisAction && ['scan', 'retry', 'escalate', 'rollback'].includes(diagnosisAction) && (canMutateSchedule || diagnosisAction === 'scan');
+  const doneStages = stages.filter((s) => s.status === 'done').length;
+  const completedStageCount = task.state === 'Done' ? stages.length : doneStages;
+  const controlTone = dispatchDiagnosis?.tone || dInfo.tone;
   const stageLine = activeStage
     ? `${activeStage.dept} · ${activeStage.action}`
     : stateLabel(task);
+  const controlDetail = dispatchDiagnosis?.detail || task.now || (activeStage ? `当前由${activeStage.dept}处理` : '等待任务状态刷新');
+  const nextActionText = dispatchDiagnosis?.nextAction || (isTerminalTask ? '查看执行回顾或输出文件' : '等待 Agent 回写进展，必要时执行扫描');
 
   return (
     <div className="modal-bg open" onClick={close}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <button className="modal-close" onClick={close} aria-label="关闭任务详情"><X size={18} /></button>
         <div className="modal-body">
-          <div className="modal-id">{task.id}</div>
-          <div className="modal-title">{task.title || '(无标题)'}</div>
+          <div className="modal-top">
+            <div className="modal-meta">
+              <span className="modal-id">{task.id}</span>
+              <span className={`tag st-${task.state}`}>{stateLabel(task)}</span>
+              <span className={`dispatch-pill ${dInfo.tone}`}>{dInfo.label}</span>
+              <span className={`hb ${hb.status}`}>{hb.label}</span>
+            </div>
+            <div className="modal-title">{task.title || '(无标题)'}</div>
+          </div>
 
-          {/* Current Stage Banner */}
-          {activeStage && (
-            <div className="cur-stage">
-              <div className="cs-icon">{activeStage.icon}</div>
-              <div className="cs-info">
-                <div className="cs-dept" style={{ color: deptColor(activeStage.dept) }}>{activeStage.dept}</div>
-                <div className="cs-action">当前阶段：{activeStage.action}</div>
-              </div>
-              <div className="cs-side">
-                <span className={`hb ${hb.status}`}>{hb.label}</span>
-                <span className={`dispatch-pill ${dInfo.tone}`}>{dInfo.label}</span>
+          <div className={`task-control ${controlTone}`}>
+            <div className="task-control-main">
+              <div className="task-control-icon">{activeStage?.icon || '•'}</div>
+              <div className="task-control-copy">
+                <span>当前状态</span>
+                <b>{stageLine}</b>
+                <p>{controlDetail}</p>
               </div>
             </div>
-          )}
+            <div className="task-control-next">
+              <span>建议动作</span>
+              <b>{nextActionText}</b>
+            </div>
+          </div>
 
-          {/* Pipeline */}
-          <div className="m-pipe">
-            {stages.map((s, i) => (
-              <div className="mp-stage" key={s.key}>
-                <div className={`mp-node ${s.status}`}>
-                  {s.status === 'done' && <div className="mp-done-tick">✓</div>}
-                  <div className="mp-icon">{s.icon}</div>
-                  <div className="mp-dept" style={s.status === 'active' ? { color: 'var(--acc)' } : s.status === 'done' ? { color: 'var(--ok)' } : {}}>
-                    {s.dept}
-                  </div>
-                  <div className="mp-action">{s.action}</div>
-                </div>
-                {i < stages.length - 1 && (
-                  <div className="mp-arrow" style={s.status === 'done' ? { color: 'var(--ok)', opacity: 0.6 } : {}}>→</div>
-                )}
+          <div className="governance-map">
+            <div className="section-headline">
+              <div>
+                <span>从下旨到回奏</span>
+                <b>治理链路</b>
               </div>
-            ))}
+              <em>{completedStageCount}/{stages.length} 已完成</em>
+            </div>
+            <div className="m-pipe">
+              {stages.map((s, i) => (
+                <div className="mp-stage" key={s.key}>
+                  <div className={`mp-node ${s.status}`}>
+                    {s.status === 'done' && <div className="mp-done-tick">✓</div>}
+                    <div className="mp-icon">{s.icon}</div>
+                    <div className="mp-dept" style={s.status === 'active' ? { color: 'var(--acc)' } : s.status === 'done' ? { color: 'var(--ok)' } : {}}>
+                      {s.dept}
+                    </div>
+                    <div className="mp-action">{s.action}</div>
+                  </div>
+                  {i < stages.length - 1 && (
+                    <div className="mp-arrow" style={s.status === 'done' ? { color: 'var(--ok)', opacity: 0.6 } : {}}>→</div>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
 
           {/* Action Buttons */}
@@ -509,39 +529,37 @@ export default function TaskModal() {
           {/* Runtime Summary */}
           <div className="run-section">
             <div className="run-head">
-              <span className="run-title">运行摘要</span>
+              <div>
+                <span className="run-title">调度诊断</span>
+                <p>把状态、派发、队列和下一步动作合并成一个可执行判断。</p>
+              </div>
               <span className="run-sub">{sched?.enabled === false ? '调度已禁用' : `阈值 ${sched?.stallThresholdSec || 180}s`}</span>
             </div>
-            <div className="run-grid">
-              <div className="run-cell"><span>阶段</span><b>{stageLine}</b></div>
-              <div className="run-cell"><span>派发</span><b className={`tone-${dInfo.tone}`}>{dInfo.label}</b></div>
-              <div className="run-cell"><span>未推进</span><b>{fmtStalled(stalledSec)}</b></div>
-              <div className="run-cell"><span>目标</span><b>{expectedAgent || lastDispatchAgent || task.org || '—'}</b></div>
-              <div className="run-cell"><span>Trace</span><b className="mono">{shortTrace(traceId)}</b></div>
-              <div className="run-cell"><span>队列</span><b className={outbox?.failed ? 'tone-err' : outbox?.pending || outbox?.running ? 'tone-warn' : 'tone-ok'}>{outboxLabel(outbox)}</b></div>
-            </div>
-            {dispatchDiagnosis && (
-              <div className={`run-diagnosis ${dispatchDiagnosis.tone || 'idle'}`}>
-                <b>{dispatchDiagnosis.label || '派发诊断'}</b>
-                <span>{dispatchDiagnosis.detail || '等待调度信息'}</span>
-                {dispatchDiagnosis.nextAction && <em>{dispatchDiagnosis.nextAction}</em>}
+            <div className="run-layout">
+              <div className={`run-diagnosis ${dispatchDiagnosis?.tone || 'idle'}`}>
+                <span className="run-diagnosis-kicker">系统判断</span>
+                <b>{dispatchDiagnosis?.label || '等待派发诊断'}</b>
+                <span>{dispatchDiagnosis?.detail || '调度信息读取中，尚无明确异常。'}</span>
+                <em>{dispatchDiagnosis?.nextAction || nextActionText}</em>
                 {canRunDiagnosisAction && (
                   <button
                     type="button"
                     disabled={!!schedActionFeedback?.pending}
-                    onClick={() => doSchedAction(diagnosisAction || '', dispatchDiagnosis.actionReason || dispatchDiagnosis.detail || dispatchDiagnosis.label || '', 'diagnosis')}
+                    onClick={() => doSchedAction(diagnosisAction || '', dispatchDiagnosis?.actionReason || dispatchDiagnosis?.detail || dispatchDiagnosis?.label || '', 'diagnosis')}
                   >
-                    {dispatchDiagnosis.actionLabel || '处理'}
+                    {dispatchDiagnosis?.actionLabel || '处理'}
                   </button>
                 )}
               </div>
-            )}
-            {schedActionFeedback && (
-              <div className={`run-action-feedback ${schedActionFeedback.tone}${schedActionFeedback.pending ? ' pending' : ''}`} role="status">
-                <b>{schedActionFeedback.label}</b>
-                <span>{schedActionFeedback.detail}</span>
+              <div className="run-grid">
+                <div className="run-cell"><span>阶段</span><b>{stageLine}</b></div>
+                <div className="run-cell"><span>派发</span><b className={`tone-${dInfo.tone}`}>{dInfo.label}</b></div>
+                <div className="run-cell"><span>未推进</span><b>{fmtStalled(stalledSec)}</b></div>
+                <div className="run-cell"><span>目标</span><b>{expectedAgent || lastDispatchAgent || task.org || '—'}</b></div>
+                <div className="run-cell"><span>Trace</span><b className="mono">{shortTrace(traceId)}</b></div>
+                <div className="run-cell"><span>队列</span><b className={outbox?.failed ? 'tone-err' : outbox?.pending || outbox?.running ? 'tone-warn' : 'tone-ok'}>{outboxLabel(outbox)}</b></div>
               </div>
-            )}
+            </div>
             {sched && (
               <div className="run-line">
                 {sched.lastProgressAt && <span>最近进展 {formatDashboardDateTime(sched.lastProgressAt)}</span>}
@@ -549,6 +567,12 @@ export default function TaskModal() {
                 {sched.lastDispatchError && <span className="run-error">派发错误：{sched.lastDispatchError}</span>}
                 <span>重试 {sched.retryCount || 0}</span>
                 <span>升级 {!sched.escalationLevel ? '无' : sched.escalationLevel === 1 ? '门下省' : '尚书省'}</span>
+              </div>
+            )}
+            {schedActionFeedback && (
+              <div className={`run-action-feedback ${schedActionFeedback.tone}${schedActionFeedback.pending ? ' pending' : ''}`} role="status">
+                <b>{schedActionFeedback.label}</b>
+                <span>{schedActionFeedback.detail}</span>
               </div>
             )}
             <div className="sched-actions compact">
@@ -564,6 +588,8 @@ export default function TaskModal() {
               )}
             </div>
           </div>
+
+          <TaskOutputSection group={activityData?.outputGroup} outputText={task.output} />
 
           <CodingSessionSection
             data={codingData}
@@ -618,8 +644,6 @@ export default function TaskModal() {
               </div>
             </div>
           )}
-
-          <TaskOutputSection group={activityData?.outputGroup} outputText={task.output} />
 
           {/* Live Activity */}
           <LiveActivitySection data={activityData} isDone={['Done', 'Cancelled'].includes(task.state)} logRef={logRef} />
@@ -808,7 +832,7 @@ function CodingSessionSection({
     <div className="cockpit">
       <div className="cockpit-head">
         <div>
-          <div className="cockpit-title">Coding Session 驾驶舱</div>
+          <div className="cockpit-title">执行证据</div>
           <div className="cockpit-sub">
             {data.runtime || 'runtime'} · session <span className="mono">{shortTrace(data.sessionId)}</span>
           </div>
