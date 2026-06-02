@@ -791,6 +791,7 @@ export interface SchedulerInfo {
   lastProgressAt?: string;
   lastDispatchAt?: string;
   lastDispatchAgent?: string;
+  lastDispatchError?: string;
   autoRollback?: boolean;
 }
 

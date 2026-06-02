@@ -470,6 +470,7 @@ textarea:focus-visible {
 .run-cell { background: rgba(16,15,13,.82); border: 1px solid rgba(59,51,40,.9); border-radius: 8px; padding: 8px 10px; min-width: 0; }
 .run-cell span { display: block; font-size: 10px; color: var(--muted); margin-bottom: 2px; }
 .run-cell b { display: block; font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-error { color: var(--danger); overflow-wrap: anywhere; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0; }
 .tone-ok { color: var(--ok) !important; }
 .tone-warn { color: var(--warn) !important; }

@@ -331,6 +331,73 @@ def test_opencode_session_not_found_restarts_and_retries(monkeypatch, tmp_path):
     assert updated['_scheduler']['lastDispatchSession'] == 'ses_ok'
 
 
+def test_opencode_session_message_not_found_restarts_and_retries(monkeypatch, tmp_path):
+    """A missing session message endpoint should use the same stale-session recovery path."""
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    task_id = 'JJC-20260602-005'
+    task = {
+        'id': task_id,
+        'title': '派发后读取 session 失败',
+        'state': 'Taizi',
+        'org': '太子',
+        'updatedAt': '2026-06-02T02:00:00Z',
+    }
+    tasks_path = data_dir / 'tasks_source.json'
+    tasks_path.write_text(json.dumps([task], ensure_ascii=False), encoding='utf-8')
+
+    monkeypatch.setenv('EDICT_RUNTIME', 'opencode')
+    monkeypatch.setenv('OPENCODE_SERVER_URL', 'http://127.0.0.1:4096')
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
+    monkeypatch.setattr(srv, '_check_gateway_alive', lambda: True)
+    monkeypatch.setattr(srv, '_resolve_opencode_bin', lambda: '/usr/local/bin/opencode')
+    monkeypatch.setattr(srv, '_trigger_refresh', lambda: None)
+
+    restarts = []
+    monkeypatch.setattr(srv, '_restart_opencode_server', lambda: restarts.append(True) or True)
+
+    session_errors = iter([
+        'OpenCode session 结果读取失败: HTTP Error 404: Not Found',
+        '',
+    ])
+    monkeypatch.setattr(srv, '_opencode_session_error', lambda session_id: next(session_errors))
+
+    class ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self.target = target
+
+        def start(self):
+            if self.target:
+                self.target()
+
+    class Completed:
+        returncode = 0
+        stderr = ''
+
+        def __init__(self, session_id):
+            self.stdout = f'{{"sessionID":"{session_id}"}}\n'
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return Completed('ses_bad' if len(calls) == 1 else 'ses_ok')
+
+    monkeypatch.setattr(srv.threading, 'Thread', ImmediateThread)
+    monkeypatch.setattr(srv, '_run_capture_timeout', fake_run)
+
+    srv.dispatch_for_state(task_id, task, 'Taizi', trigger='imperial-edict')
+
+    assert len(calls) == 2
+    assert restarts == [True]
+    updated = json.loads(tasks_path.read_text(encoding='utf-8'))[0]
+    assert updated['_scheduler']['lastDispatchStatus'] == 'success'
+    assert updated['_scheduler']['lastDispatchSession'] == 'ses_ok'
+
+
 def test_stale_dispatch_result_does_not_override_newer_progress(monkeypatch, tmp_path):
     """A late dispatch result must not overwrite progress from a newer task state."""
     import server as srv

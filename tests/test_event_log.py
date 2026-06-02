@@ -180,6 +180,8 @@ def test_opencode_session_error_is_detected(monkeypatch):
 
     stdout = '{"type":"text","sessionID":"ses_bad","part":{"text":"x"}}\n'
     assert srv._opencode_session_id_from_output(stdout) == 'ses_bad'
+    assert srv._is_opencode_session_not_found('Error: Session not found')
+    assert srv._is_opencode_session_not_found('OpenCode session 结果读取失败: HTTP Error 404: Not Found')
 
     class Resp:
         def read(self):

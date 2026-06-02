@@ -69,6 +69,7 @@ const DISPATCH_LABELS: Record<string, { label: string; tone: 'ok' | 'warn' | 'er
   'gateway-offline': { label: '运行时未启动', tone: 'err' },
   'openclaw-missing': { label: 'OpenClaw CLI 缺失', tone: 'err' },
   'opencode-missing': { label: 'OpenCode CLI 缺失', tone: 'err' },
+  'opencode-session-stale': { label: 'OpenCode 会话失效', tone: 'warn' },
 };
 
 function dispatchInfo(sched?: SchedulerInfo | null) {
@@ -461,6 +462,7 @@ export default function TaskModal() {
               <div className="run-line">
                 {sched.lastProgressAt && <span>最近进展 {formatDashboardDateTime(sched.lastProgressAt)}</span>}
                 {sched.lastDispatchAt && <span>最近派发 {formatDashboardDateTime(sched.lastDispatchAt)}</span>}
+                {sched.lastDispatchError && <span className="run-error">派发错误：{sched.lastDispatchError}</span>}
                 <span>重试 {sched.retryCount || 0}</span>
                 <span>升级 {!sched.escalationLevel ? '无' : sched.escalationLevel === 1 ? '门下省' : '尚书省'}</span>
               </div>

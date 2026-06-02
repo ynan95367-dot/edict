@@ -33,6 +33,7 @@ const DISPATCH_STATUS: Record<string, { label: string; tone: 'ok' | 'warn' | 'er
   'gateway-offline': { label: '运行时未启动', tone: 'err' },
   'openclaw-missing': { label: 'OpenClaw 缺失', tone: 'err' },
   'opencode-missing': { label: 'OpenCode 缺失', tone: 'err' },
+  'opencode-session-stale': { label: 'OpenCode 会话失效', tone: 'warn' },
 };
 
 function dispatchBadge(task: Task) {

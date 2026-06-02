@@ -2918,7 +2918,28 @@ def _run_capture_timeout(cmd, *, timeout, env=None, cwd=None):
 
 
 def _is_opencode_session_not_found(error_text):
-    return 'Session not found' in _clean_runtime_error(error_text, limit=1000)
+    cleaned = _clean_runtime_error(error_text, limit=1000)
+    lowered = cleaned.lower()
+    return (
+        'session not found' in lowered
+        or (
+            cleaned.startswith('OpenCode session 结果读取失败:')
+            and ('404' in cleaned or 'not found' in lowered)
+        )
+    )
+
+
+def _record_opencode_session_recovery(task_id, agent_id, trigger, dispatch_id, attempt, err, trace_id):
+    _append_runtime_event('dispatch_runtime_recovering', task_id, agent_id, {
+        'from': 'OpenCode',
+        'to': agent_id,
+        'trigger': trigger,
+        'status': 'opencode-session-stale',
+        'attempt': attempt,
+        'dispatchId': dispatch_id,
+        'error': err,
+        'remark': 'OpenCode session registry stale，正在重启 OpenCode server 后重试',
+    }, confidence='medium', trace_id=trace_id)
 
 
 def _restart_opencode_server():
@@ -6197,11 +6218,18 @@ def _execute_dispatch_outbox_item(item):
                 if session_error:
                     err = _clean_runtime_error(session_error, limit=300)
                     log.warning(f'⚠️ {task_id} OpenCode session 报错(第{attempt}次): {err}')
+                    session_failure_status = 'agent-error'
+                    if runtime == 'opencode' and _is_opencode_session_not_found(err):
+                        final_status = 'opencode-session-stale'
+                        session_failure_status = final_status
+                        _record_opencode_session_recovery(task_id, agent_id, trigger, dispatch_id, attempt, err, trace_id)
+                        if attempt < max_retries and _restart_opencode_server():
+                            continue
                     _append_runtime_event('dispatch_failed', task_id, agent_id, {
                         'from': runtime_label,
                         'to': agent_id,
                         'trigger': trigger,
-                        'status': 'agent-error',
+                        'status': session_failure_status,
                         'attempt': attempt,
                         'sessionId': session_id,
                         'dispatchId': dispatch_id,
@@ -6239,16 +6267,7 @@ def _execute_dispatch_outbox_item(item):
             if runtime == 'opencode' and _is_opencode_session_not_found(err):
                 final_status = 'opencode-session-stale'
                 log.warning(f'⚠️ {task_id} OpenCode session registry 异常，准备重启 server 后重试')
-                _append_runtime_event('dispatch_runtime_recovering', task_id, agent_id, {
-                    'from': runtime_label,
-                    'to': agent_id,
-                    'trigger': trigger,
-                    'status': final_status,
-                    'attempt': attempt,
-                    'dispatchId': dispatch_id,
-                    'error': err,
-                    'remark': 'OpenCode session registry stale，正在重启 OpenCode server 后重试',
-                }, confidence='medium', trace_id=trace_id)
+                _record_opencode_session_recovery(task_id, agent_id, trigger, dispatch_id, attempt, err, trace_id)
                 if attempt < max_retries and _restart_opencode_server():
                     continue
             log.warning(f'⚠️ {task_id} 自动派发失败(第{attempt}次): {err}')
