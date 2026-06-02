@@ -3669,6 +3669,8 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'label': '流程已收口',
             'detail': '任务已进入终态，不再自动派发。',
             'nextAction': '查看执行回顾或输出文件',
+            'action': 'none',
+            'actionLabel': '',
             'retryable': False,
         }
     if sched.get('enabled') is False:
@@ -3677,6 +3679,8 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'label': '调度已禁用',
             'detail': '自动派发被关闭，平台不会继续推动当前任务。',
             'nextAction': '需要继续时先恢复调度或手动推进',
+            'action': 'none',
+            'actionLabel': '',
             'retryable': False,
         }
     if failed:
@@ -3685,6 +3689,8 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'label': '存在失败派发',
             'detail': error or '运行时 outbox 中还有失败记录。',
             'nextAction': '点击重试派发；确认无效后归档失败项',
+            'action': 'retry',
+            'actionLabel': '重试派发',
             'retryable': True,
         }
     if status in {'gateway-offline', 'opencode-missing', 'openclaw-missing'}:
@@ -3693,6 +3699,8 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'label': '运行时不可用',
             'detail': error or '派发所需运行时或 CLI 不可用。',
             'nextAction': '先启动运行时或修复 CLI 配置，再重试派发',
+            'action': 'retry',
+            'actionLabel': '重试派发',
             'retryable': True,
         }
     if status in {'failed', 'timeout', 'error'}:
@@ -3701,6 +3709,8 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'label': '最近派发失败',
             'detail': error or '最近一次自动派发没有成功收口。',
             'nextAction': '点击重试派发，必要时升级协调',
+            'action': 'retry',
+            'actionLabel': '重试派发',
             'retryable': True,
         }
     if status == 'opencode-session-stale':
@@ -3709,6 +3719,8 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'label': 'OpenCode 会话失效',
             'detail': error or 'OpenCode session registry 曾失效，平台会尝试重启后重派。',
             'nextAction': '等待自愈完成；若仍无进展，手动重试派发',
+            'action': 'retry',
+            'actionLabel': '重试派发',
             'retryable': True,
         }
     if active_dispatch or pending or running or status == 'queued':
@@ -3717,6 +3729,8 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'label': '派发处理中',
             'detail': f'队列 pending={pending} running={running}，等待运行时接收任务。',
             'nextAction': '短暂等待；超过阈值后执行立即扫描或重试',
+            'action': 'scan',
+            'actionLabel': '立即扫描',
             'retryable': False,
         }
     if status in {'success', 'progress'}:
@@ -3726,6 +3740,8 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
                 'label': '已派发但未推进',
                 'detail': f'最近派发已成功，但 {stalled_sec} 秒没有新进展。',
                 'nextAction': '先立即扫描；仍无证据再重试派发',
+                'action': 'scan',
+                'actionLabel': '立即扫描',
                 'retryable': True,
             }
         return {
@@ -3733,6 +3749,8 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'label': '派发正常',
             'detail': '最近派发已被运行时接收，暂未发现阻塞。',
             'nextAction': '等待 Agent 继续回写进展',
+            'action': 'none',
+            'actionLabel': '',
             'retryable': False,
         }
     if expected_agent:
@@ -3741,6 +3759,8 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'label': '等待派发',
             'detail': f'当前阶段预期由 {expected_label} 处理，尚无有效派发结果。',
             'nextAction': '点击重试派发或手动推进',
+            'action': 'retry',
+            'actionLabel': '重试派发',
             'retryable': True,
         }
     return {
@@ -3748,6 +3768,8 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
         'label': '无需派发',
         'detail': '当前阶段没有匹配的自动派发 Agent。',
         'nextAction': '查看流程或手动推进',
+        'action': 'none',
+        'actionLabel': '',
         'retryable': False,
     }
 

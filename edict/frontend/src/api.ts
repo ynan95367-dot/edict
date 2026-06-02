@@ -808,6 +808,8 @@ export interface SchedulerStateData {
     label?: string;
     detail?: string;
     nextAction?: string;
+    action?: 'scan' | 'retry' | 'escalate' | 'rollback' | 'none' | string;
+    actionLabel?: string;
     retryable?: boolean;
   };
 }

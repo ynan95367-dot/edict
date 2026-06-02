@@ -325,6 +325,7 @@ export default function TaskModal() {
   };
 
   const doSchedAction = async (action: string) => {
+    if (!['scan', 'retry', 'escalate', 'rollback'].includes(action)) return;
     if (action === 'scan') {
       try {
         const r = await api.schedulerScan(180);
@@ -377,6 +378,8 @@ export default function TaskModal() {
   const traceId = schedData?.traceId || activityData?.traceId || task.traceId || task.trace_id || '';
   const outbox = schedData?.outbox || activityData?.traceSummary?.outbox;
   const dispatchDiagnosis = schedData?.dispatchDiagnosis;
+  const diagnosisAction = dispatchDiagnosis?.action;
+  const canRunDiagnosisAction = !!diagnosisAction && ['scan', 'retry', 'escalate', 'rollback'].includes(diagnosisAction);
   const stageLine = activeStage
     ? `${activeStage.dept} · ${activeStage.action}`
     : stateLabel(task);
@@ -464,6 +467,11 @@ export default function TaskModal() {
                 <b>{dispatchDiagnosis.label || '派发诊断'}</b>
                 <span>{dispatchDiagnosis.detail || '等待调度信息'}</span>
                 {dispatchDiagnosis.nextAction && <em>{dispatchDiagnosis.nextAction}</em>}
+                {canRunDiagnosisAction && (
+                  <button type="button" onClick={() => doSchedAction(diagnosisAction || '')}>
+                    {dispatchDiagnosis.actionLabel || '处理'}
+                  </button>
+                )}
               </div>
             )}
             {sched && (
