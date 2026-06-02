@@ -250,6 +250,29 @@ def test_runtime_outbox_health_exposes_dead_letters(tmp_path, monkeypatch):
     assert health['activeItems'][0]['taskId'] == 'JJC-PEND-1'
 
 
+def test_runtime_outbox_public_item_sanitizes_json_event_error():
+    import server as srv
+
+    event_stream = '\n'.join([
+        json.dumps({'type': 'step_start', 'part': {'type': 'step-start'}}),
+        json.dumps({'type': 'message_updated', 'part': {'type': 'text', 'text': 'working'}}),
+    ])
+
+    public = srv._public_outbox_item({
+        'id': 'dispatch_failed_json',
+        'kind': 'dispatch',
+        'taskId': 'JJC-FAIL-JSON',
+        'status': 'failed',
+        'attempts': 1,
+        'maxAttempts': 1,
+        'createdAt': '2026-05-31T09:00:00Z',
+        'lastError': event_stream,
+    })
+
+    assert public['lastError'] == '运行时返回了事件流，未给出明确错误'
+    assert 'step_start' not in public['lastError']
+
+
 def test_runtime_outbox_retry_requeues_failed_item(tmp_path, monkeypatch):
     import server as srv
 
@@ -329,6 +352,35 @@ def test_runtime_outbox_requeues_orphaned_running_item(tmp_path, monkeypatch):
     assert updated['lastError'] == 'startup recovery'
 
 
+def test_runtime_outbox_claim_clears_previous_error(tmp_path, monkeypatch):
+    import runtime_outbox
+
+    outbox_path = tmp_path / 'runtime_outbox.json'
+    outbox_path.write_text(json.dumps([
+        {
+            'id': 'dispatch_pending',
+            'kind': 'dispatch',
+            'taskId': 'JJC-RUN-2',
+            'state': 'Taizi',
+            'agentId': 'taizi',
+            'status': 'pending',
+            'attempts': 0,
+            'maxAttempts': 2,
+            'lastError': 'dashboard startup recovery',
+            'createdAt': '2026-06-02T01:00:00Z',
+            'updatedAt': '2026-06-02T01:00:00Z',
+        },
+    ], ensure_ascii=False), encoding='utf-8')
+    monkeypatch.setattr(runtime_outbox, 'OUTBOX_FILE', outbox_path)
+
+    claimed = runtime_outbox.claim_pending(worker_id='dashboard-new', limit=1)
+
+    updated = json.loads(outbox_path.read_text(encoding='utf-8'))[0]
+    assert claimed[0]['id'] == 'dispatch_pending'
+    assert updated['status'] == 'running'
+    assert updated['lastError'] == ''
+
+
 def test_runtime_outbox_compacts_unfinished_duplicates(tmp_path, monkeypatch):
     import runtime_outbox
 
@@ -365,6 +417,40 @@ def test_runtime_outbox_compacts_unfinished_duplicates(tmp_path, monkeypatch):
     assert updated[1]['status'] == 'cancelled'
     assert updated[1]['lastError'] == 'duplicate cleanup'
     assert updated[1]['result']['dedupedInto'] == 'dispatch_running'
+
+
+def test_opencode_activity_parser_tolerates_nondict_shapes(monkeypatch):
+    import server as srv
+
+    monkeypatch.setattr(srv, '_opencode_parts_for_message', lambda message: [
+        {'type': 'tool', 'tool': 'bash', 'state': True, 'time': True},
+        {'type': 'step-finish', 'tokens': True, 'cost': 0},
+        {'type': 'text', 'text': '处理完成'},
+    ])
+
+    search_text = srv._opencode_message_search_text({'id': 'msg_test', 'summary': True}, include_parts=True)
+    entries = srv._parse_opencode_parts({'id': 'msg_test', 'role': 'assistant', 'time': True})
+
+    assert 'msg_test' in search_text
+    assert any(entry.get('text') == '处理完成' for entry in entries)
+
+
+def test_runtime_error_summary_hides_json_event_stream():
+    import server as srv
+
+    event_stream = '\n'.join([
+        json.dumps({'type': 'step_start', 'part': {'type': 'step-start'}}),
+        json.dumps({'type': 'message_updated', 'part': {'type': 'text', 'text': 'working'}}),
+    ])
+    error_stream = json.dumps({
+        'type': 'error',
+        'error': {'data': {'message': 'unknown certificate verification error'}},
+    })
+    truncated_event = '{"type":"step_start","timestamp":1780358912332,"sessionID":"ses_123","part":{"type":"step-start"'
+
+    assert srv._runtime_error_summary(event_stream, default='OpenCode timeout') == 'OpenCode timeout'
+    assert srv._runtime_error_summary(error_stream, default='OpenCode timeout') == 'unknown certificate verification error'
+    assert srv._runtime_error_summary(truncated_event, default='OpenCode timeout') == 'OpenCode timeout'
 
 
 def test_patch_review_create_and_approve(tmp_path, monkeypatch):

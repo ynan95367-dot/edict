@@ -1060,6 +1060,13 @@ function LiveActivitySection({
             <em>{outboxLabel(data.traceSummary.outbox)}</em>
           </div>
         )}
+        {data.activityWindow?.truncated && (
+          <div className="li-item">
+            <span>动态</span>
+            <b>{data.activityWindow.returned || activity.length}/{data.activityWindow.total || activity.length}</b>
+            <em>已折叠低信号记录</em>
+          </div>
+        )}
       </div>
 
       {ts && (

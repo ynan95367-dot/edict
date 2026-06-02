@@ -217,6 +217,7 @@ def claim_pending(*, worker_id: str, kinds: set[str] | None = None, limit: int =
             item['claimedAt'] = now
             item['updatedAt'] = now
             item['attempts'] = int(item.get('attempts') or 0) + 1
+            item['lastError'] = ''
             claimed.append(dict(item))
         return items
 

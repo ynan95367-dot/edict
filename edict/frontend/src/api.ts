@@ -731,6 +731,7 @@ export interface TaskActivityData {
   message?: string;
   error?: string;
   activity?: ActivityEntry[];
+  activityWindow?: { total?: number; returned?: number; truncated?: boolean };
   relatedAgents?: string[];
   agentLabel?: string;
   lastActive?: string;

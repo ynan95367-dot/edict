@@ -2640,6 +2640,83 @@ def _clean_runtime_error(text, limit=500):
     return cleaned[:limit]
 
 
+def _dict(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _list(value):
+    return value if isinstance(value, list) else []
+
+
+def _runtime_error_from_obj(obj):
+    if not isinstance(obj, dict):
+        return ''
+    for container in (obj, _dict(obj.get('info')), _dict(obj.get('part')), _dict(obj.get('data'))):
+        err = container.get('error')
+        if not err:
+            continue
+        if isinstance(err, dict):
+            detail = _dict(err.get('data'))
+            return str(detail.get('message') or err.get('message') or err.get('name') or err)
+        return str(err)
+    part = _dict(obj.get('part'))
+    state = _dict(part.get('state'))
+    if state.get('error'):
+        return str(state.get('error'))
+    for key in ('message', 'reason'):
+        val = obj.get(key)
+        if isinstance(val, str) and val.strip() and obj.get('type') in {'error', 'failed'}:
+            return val.strip()
+    return ''
+
+
+def _looks_like_runtime_event_line(text):
+    if not isinstance(text, str):
+        return False
+    sample = text.strip()
+    if not sample.startswith('{') or '"type"' not in sample:
+        return False
+    event_markers = (
+        'step_start',
+        'step-start',
+        'step_finish',
+        'step-finish',
+        'message_updated',
+        'part_updated',
+        '"sessionID"',
+        '"messageID"',
+    )
+    return any(marker in sample for marker in event_markers)
+
+
+def _runtime_error_summary(text, default='runtime command failed', limit=500):
+    cleaned = _clean_runtime_error(text, limit=20_000)
+    if not cleaned:
+        return default[:limit]
+    json_line_count = 0
+    event_line_count = 0
+    non_json_lines = []
+    for line in cleaned.splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            item = json.loads(raw)
+        except Exception:
+            if _looks_like_runtime_event_line(raw):
+                event_line_count += 1
+                continue
+            non_json_lines.append(raw)
+            continue
+        json_line_count += 1
+        err = _runtime_error_from_obj(item)
+        if err:
+            return _clean_runtime_error(err, limit=limit)
+    if (json_line_count or event_line_count) and not non_json_lines:
+        return default[:limit]
+    return _clean_runtime_error('\n'.join(non_json_lines) or cleaned, limit=limit)
+
+
 def _run_capture_timeout(cmd, *, timeout, env=None, cwd=None):
     """Run a CLI command and reliably reap its process group on timeout."""
     proc = subprocess.Popen(
@@ -3040,7 +3117,11 @@ def wake_agent(agent_id, message=''):
                         'attempt': attempt,
                     })
                     return
-                err_msg = result.stderr[:200] if result.stderr else result.stdout[:200]
+                err_msg = _runtime_error_summary(
+                    result.stderr if result.stderr else result.stdout,
+                    default='wake command failed',
+                    limit=200,
+                )
                 log.warning(f'⚠️ {agent_id} 唤醒失败(第{attempt}次): {err_msg}')
                 if attempt < 2:
                     import time
@@ -3049,11 +3130,15 @@ def wake_agent(agent_id, message=''):
             _append_runtime_event('agent_message_failed', '', agent_id, {
                 'from': 'dashboard',
                 'to': agent_id,
-                'error': 'wake failed after retries',
+                'error': err_msg if 'err_msg' in locals() else 'wake failed after retries',
                 'status': 'failed',
             }, confidence='low')
         except subprocess.TimeoutExpired as exc:
-            timeout_error = _clean_runtime_error(getattr(exc, 'stderr', '') or getattr(exc, 'output', '') or 'wake timeout', limit=300)
+            timeout_error = _runtime_error_summary(
+                getattr(exc, 'stderr', '') or getattr(exc, 'output', ''),
+                default=f'{_runtime_label()} 唤醒超时（{agent_id}）',
+                limit=300,
+            )
             log.error(f'❌ {agent_id} 唤醒超时(130s)')
             _append_runtime_event('agent_message_failed', '', agent_id, {
                 'from': 'dashboard',
@@ -3092,8 +3177,27 @@ _ORG_AGENT_MAP = {
     '刑部': 'xingbu', '工部': 'gongbu', '吏部': 'libu_hr',
     '中书省': 'zhongshu', '门下省': 'menxia', '尚书省': 'shangshu',
 }
+_BASE_AGENT_IDS = {
+    agent_id for agent_id in list(_STATE_AGENT_MAP.values()) + list(_ORG_AGENT_MAP.values())
+    if agent_id
+}
+_ACTIVITY_UI_LIMIT = 240
 
 _TERMINAL_STATES = {'Done', 'Cancelled'}
+
+
+def _known_agent_ids():
+    ids = set(_BASE_AGENT_IDS)
+    cfg = read_json(DATA / 'agent_config.json', {})
+    for agent in cfg.get('agents', []) if isinstance(cfg, dict) else []:
+        if isinstance(agent, dict) and agent.get('id'):
+            ids.add(str(agent.get('id')))
+    return ids
+
+
+def _normalize_related_agents(values):
+    known = _known_agent_ids()
+    return sorted({str(v) for v in values if str(v) in known})
 
 
 def _expected_agent_for_task(task, state=None):
@@ -3261,7 +3365,11 @@ def _public_outbox_item(item, task_map=None, now_dt=None):
         'updatedAt': item.get('updatedAt', ''),
         'claimedAt': item.get('claimedAt', ''),
         'finishedAt': item.get('finishedAt', ''),
-        'lastError': item.get('lastError', ''),
+        'lastError': _runtime_error_summary(
+            item.get('lastError', ''),
+            default='运行时返回了事件流，未给出明确错误',
+            limit=300,
+        ) if item.get('lastError') else '',
         'result': item.get('result') if isinstance(item.get('result'), dict) else {},
         'ageSec': age_sec,
         'ageText': _duration_text(age_sec),
@@ -3718,8 +3826,11 @@ def handle_repair_flow_order():
 
 def _collect_message_text(msg):
     """收集消息中的可检索文本，用于 task_id/关键词过滤。"""
+    msg = _dict(msg)
     parts = []
-    for c in msg.get('content', []) or []:
+    for c in _list(msg.get('content')):
+        if not isinstance(c, dict):
+            continue
         ctype = c.get('type')
         if ctype == 'text' and c.get('text'):
             parts.append(str(c.get('text', '')))
@@ -3727,7 +3838,7 @@ def _collect_message_text(msg):
             parts.append(str(c.get('thinking', '')))
         elif ctype == 'tool_use':
             parts.append(json.dumps(c.get('input', {}), ensure_ascii=False))
-    details = msg.get('details') or {}
+    details = _dict(msg.get('details'))
     for key in ('output', 'stdout', 'stderr', 'message'):
         val = details.get(key)
         if isinstance(val, str) and val:
@@ -3737,7 +3848,8 @@ def _collect_message_text(msg):
 
 def _parse_activity_entry(item):
     """将 session jsonl 的 message 统一解析成看板活动条目。"""
-    msg = item.get('message') or {}
+    item = _dict(item)
+    msg = _dict(item.get('message'))
     role = str(msg.get('role', '')).strip().lower()
     ts = item.get('timestamp', '')
 
@@ -3745,7 +3857,9 @@ def _parse_activity_entry(item):
         text = ''
         thinking = ''
         tool_calls = []
-        for c in msg.get('content', []) or []:
+        for c in _list(msg.get('content')):
+            if not isinstance(c, dict):
+                continue
             if c.get('type') == 'text' and c.get('text') and not text:
                 text = str(c.get('text', '')).strip()
             elif c.get('type') == 'thinking' and c.get('thinking') and not thinking:
@@ -3767,12 +3881,14 @@ def _parse_activity_entry(item):
         return entry
 
     if role in ('toolresult', 'tool_result'):
-        details = msg.get('details') or {}
+        details = _dict(msg.get('details'))
         code = details.get('exitCode')
         if code is None:
             code = details.get('code', details.get('status'))
         output = ''
-        for c in msg.get('content', []) or []:
+        for c in _list(msg.get('content')):
+            if not isinstance(c, dict):
+                continue
             if c.get('type') == 'text' and c.get('text'):
                 output = str(c.get('text', '')).strip()[:200]
                 break
@@ -3797,7 +3913,9 @@ def _parse_activity_entry(item):
 
     if role == 'user':
         text = ''
-        for c in msg.get('content', []) or []:
+        for c in _list(msg.get('content')):
+            if not isinstance(c, dict):
+                continue
             if c.get('type') == 'text' and c.get('text'):
                 text = str(c.get('text', '')).strip()
                 break
@@ -3823,8 +3941,9 @@ def _opencode_ts_to_iso(value):
 
 
 def _opencode_part_time(part):
-    state_time = ((part.get('state') or {}).get('time') or {})
-    part_time = part.get('time') or {}
+    part = _dict(part)
+    state_time = _dict(_dict(part.get('state')).get('time'))
+    part_time = _dict(part.get('time'))
     return (
         state_time.get('start')
         or part_time.get('start')
@@ -4031,7 +4150,8 @@ def _opencode_messages_for_session(session_id):
 
 
 def _opencode_parts_for_message(message):
-    msg_id = _safe_opencode_id((message or {}).get('id', ''), 'msg_')
+    message = _dict(message)
+    msg_id = _safe_opencode_id(message.get('id', ''), 'msg_')
     if not msg_id:
         return []
     part_dir = _opencode_storage() / 'part' / msg_id
@@ -4067,7 +4187,7 @@ def _opencode_part_search_text(part):
     if not isinstance(part, dict):
         return ''
     values = [part.get('type', ''), part.get('tool', '')]
-    state = part.get('state') or {}
+    state = _dict(part.get('state'))
     for key in ('title', 'output', 'error'):
         if state.get(key):
             values.append(str(state.get(key))[:2000])
@@ -4083,10 +4203,12 @@ def _opencode_part_search_text(part):
 
 
 def _opencode_message_search_text(message, include_parts=False):
+    message = _dict(message)
+    summary = _dict(message.get('summary'))
     values = [
         str(message.get('id') or ''),
         str(message.get('agent') or ''),
-        str((message.get('summary') or {}).get('title') or ''),
+        str(summary.get('title') or ''),
     ]
     if include_parts:
         values.extend(_opencode_part_search_text(part) for part in _opencode_parts_for_message(message))
@@ -4132,7 +4254,8 @@ def _opencode_session_candidates(agent_id='', task_id=None, keywords=None, limit
             if hits < min(2, len(keywords)):
                 continue
 
-        updated = ((session.get('time') or {}).get('updated') or (session.get('time') or {}).get('created') or 0)
+        session_time = _dict(session.get('time'))
+        updated = (session_time.get('updated') or session_time.get('created') or 0)
         candidates.append((int(updated or 0), session, messages))
 
     candidates.sort(key=lambda item: item[0], reverse=True)
@@ -4215,11 +4338,12 @@ def _opencode_tool_context(raw_input):
 
 
 def _parse_opencode_parts(message, limit_per_message=20):
+    message = _dict(message)
     parts = _opencode_parts_for_message(message)
     if not parts:
-        summary = (message.get('summary') or {}).get('title') or ''
+        summary = _dict(message.get('summary')).get('title') or ''
         role = str(message.get('role') or '').lower()
-        at = _opencode_ts_to_iso((message.get('time') or {}).get('created'))
+        at = _opencode_ts_to_iso(_dict(message.get('time')).get('created'))
         if summary and role == 'user':
             return [{'at': at, 'kind': 'user', 'text': summary[:200], 'agent': message.get('agent', '')}]
         if summary:
@@ -4230,8 +4354,10 @@ def _parse_opencode_parts(message, limit_per_message=20):
     agent = message.get('agent', '')
     role = str(message.get('role') or '').lower()
     for part in parts[:limit_per_message]:
+        if not isinstance(part, dict):
+            continue
         ptype = part.get('type')
-        at = _opencode_ts_to_iso(_opencode_part_time(part) or (message.get('time') or {}).get('created'))
+        at = _opencode_ts_to_iso(_opencode_part_time(part) or _dict(message.get('time')).get('created'))
         if ptype == 'text' and part.get('text'):
             entries.append({
                 'at': at,
@@ -4242,7 +4368,7 @@ def _parse_opencode_parts(message, limit_per_message=20):
                 'eventKind': 'opencode_text',
             })
         elif ptype == 'tool':
-            state = part.get('state') or {}
+            state = _dict(part.get('state'))
             tool_name = part.get('tool') or state.get('tool') or ''
             status = state.get('status', '')
             raw_input = state.get('input')
@@ -4271,14 +4397,14 @@ def _parse_opencode_parts(message, limit_per_message=20):
             entries.append(tool_entry)
 
             output = state.get('output') or state.get('error') or state.get('title') or ''
-            metadata = state.get('metadata') or {}
+            metadata = _dict(state.get('metadata'))
             if not output and isinstance(metadata, dict):
                 output = metadata.get('output') or metadata.get('preview') or metadata.get('description') or ''
             exit_code = metadata.get('exit')
             if exit_code is None and status and status != 'completed':
                 exit_code = 1
             entries.append({
-                'at': _opencode_ts_to_iso(((state.get('time') or {}).get('end')) or _opencode_part_time(part)),
+                'at': _opencode_ts_to_iso((_dict(state.get('time')).get('end')) or _opencode_part_time(part)),
                 'kind': 'tool_result',
                 'agent': agent,
                 'tool': tool_name,
@@ -4296,7 +4422,7 @@ def _parse_opencode_parts(message, limit_per_message=20):
             })
         elif ptype == 'patch':
             tools = []
-            for raw_path in part.get('files') or []:
+            for raw_path in _list(part.get('files')):
                 source = _safe_source_path(str(raw_path), allow_missing=True)
                 rel = _rel_project_path(source) if source else str(raw_path)
                 tools.append({
@@ -4320,7 +4446,7 @@ def _parse_opencode_parts(message, limit_per_message=20):
                     'sessionId': message.get('sessionID', ''),
                 })
         elif ptype == 'step-finish':
-            tokens = part.get('tokens') or {}
+            tokens = _dict(part.get('tokens'))
             total_tokens = 0
             for val in tokens.values():
                 if isinstance(val, dict):
@@ -4346,7 +4472,9 @@ def get_opencode_session_activity(session_id, agent_id='', limit=80):
     if not session or not _opencode_session_belongs_to_project(session):
         return []
     entries = []
-    for message in sorted(_opencode_messages_for_session(session_id), key=lambda m: ((m.get('time') or {}).get('created') or 0)):
+    for message in sorted(_opencode_messages_for_session(session_id), key=lambda m: (_dict(_dict(m).get('time')).get('created') or 0)):
+        if not isinstance(message, dict):
+            continue
         if agent_id and message.get('agent') and message.get('agent') != agent_id:
             continue
         entries.extend(_parse_opencode_parts(message, limit_per_message=40))
@@ -4358,7 +4486,9 @@ def get_opencode_agent_activity(agent_id, limit=30, task_id=None, keywords=None)
     entries = []
     candidates = _opencode_session_candidates(agent_id, task_id=task_id, keywords=keywords, limit_sessions=5 if (task_id or keywords) else 1)
     for _updated, _session, messages in candidates:
-        for message in sorted(messages, key=lambda m: ((m.get('time') or {}).get('created') or 0)):
+        for message in sorted(messages, key=lambda m: (_dict(_dict(m).get('time')).get('created') or 0)):
+            if not isinstance(message, dict):
+                continue
             if agent_id and message.get('agent') and message.get('agent') != agent_id:
                 continue
             entries.extend(_parse_opencode_parts(message))
@@ -4380,10 +4510,12 @@ def _task_opencode_session_ids(task, ledger_events):
     add(sched.get('lastDispatchSession'))
     add(sched.get('activeDispatchSession'))
     for event in ledger_events or []:
+        if not isinstance(event, dict):
+            continue
         add(event.get('sessionId'))
-        payload = event.get('payload') or {}
+        payload = _dict(event.get('payload'))
         add(payload.get('sessionId'))
-        result = payload.get('result') if isinstance(payload.get('result'), dict) else {}
+        result = _dict(payload.get('result'))
         add(result.get('sessionId'))
     return out
 
@@ -4689,6 +4821,7 @@ def _compute_todos_diff(prev_todos, curr_todos):
 
 
 def _activity_key(entry):
+    entry = _dict(entry)
     kind = entry.get('kind', '')
     at = entry.get('at', '')
     if kind == 'flow':
@@ -4722,6 +4855,40 @@ def _activity_key(entry):
         )
         return (kind, at, entry.get('agent', ''), entry.get('text', ''), entry.get('eventKind', ''), tool_sig)
     return (kind, at, entry.get('agent', ''), entry.get('text', '') or entry.get('eventKind', ''))
+
+
+def _activity_has_visible_content(entry):
+    entry = _dict(entry)
+    kind = entry.get('kind', '')
+    if kind in {'flow', 'progress', 'todos', 'user'}:
+        return True
+    if kind == 'assistant':
+        return bool(entry.get('text') or entry.get('thinking') or entry.get('tools'))
+    if kind == 'tool_result':
+        return bool(entry.get('output') or entry.get('tool') or entry.get('command') or entry.get('path'))
+    return bool(entry.get('text') or entry.get('remark') or entry.get('output') or entry.get('eventKind'))
+
+
+def _compact_activity_for_ui(activity, limit=_ACTIVITY_UI_LIMIT):
+    items = [item for item in activity if isinstance(item, dict) and _activity_has_visible_content(item)]
+    total = len(items)
+    if total <= limit:
+        return items, {'total': total, 'returned': total, 'truncated': False}
+
+    pinned = [item for item in items if item.get('kind') in {'flow', 'progress', 'todos'}]
+    selected = []
+    seen = set()
+    # Keep a bounded amount of high-signal state/progress evidence, then recent details.
+    for item in pinned[:80] + items[-limit:]:
+        key = _activity_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(item)
+    selected.sort(key=lambda x: x.get('at', ''))
+    if len(selected) > limit:
+        selected = selected[-limit:]
+    return selected, {'total': total, 'returned': len(selected), 'truncated': True}
 
 
 def _parse_activity_dt(value):
@@ -5413,7 +5580,9 @@ def get_task_activity(task_id):
                     existing_keys.add(key)
             activity.sort(key=lambda x: x.get('at', ''))
             for event in ledger_events:
-                aid = event.get('agentId') or (event.get('payload') or {}).get('to') or ''
+                if not isinstance(event, dict):
+                    continue
+                aid = event.get('agentId') or _dict(event.get('payload')).get('to') or ''
                 if aid:
                     related_agents.add(aid)
         except Exception as e:
@@ -5439,6 +5608,9 @@ def get_task_activity(task_id):
                 activity.sort(key=lambda x: x.get('at', ''))
         except Exception as e:
             log.warning(f'OpenCode session 融合失败 (task={task_id}): {e}')
+
+    full_activity = activity
+    activity, activity_window = _compact_activity_for_ui(full_activity)
 
     # ── 阶段耗时统计 ──
     phase_durations = _compute_phase_durations(flow_log)
@@ -5489,12 +5661,13 @@ def get_task_activity(task_id):
         'agentLabel': _STATE_LABELS.get(state, state),
         'lastActive': last_active,
         'activity': activity,
+        'activityWindow': activity_window,
         'activitySource': 'progress+session+event-ledger' if ledger_events else 'progress+session',
-        'relatedAgents': sorted(list(related_agents)),
+        'relatedAgents': _normalize_related_agents(related_agents),
         'phaseDurations': phase_durations,
         'totalDuration': total_duration,
-        'stateEvidence': _build_state_evidence(task, ledger_events, activity),
-        'traceSummary': _build_trace_summary(trace_id, ledger_events, activity, outbox_summary),
+        'stateEvidence': _build_state_evidence(task, ledger_events, full_activity),
+        'traceSummary': _build_trace_summary(trace_id, ledger_events, full_activity, outbox_summary),
     }
     if todos_summary:
         result['todosSummary'] = todos_summary
@@ -5870,7 +6043,11 @@ def _execute_dispatch_outbox_item(item):
                     'remark': f'派发成功: {agent_id}（{trigger}）',
                 }, trace_id=trace_id, session_id=session_id)
                 return
-            err = _clean_runtime_error(result.stderr if result.stderr else result.stdout, limit=300)
+            err = _runtime_error_summary(
+                result.stderr if result.stderr else result.stdout,
+                default='runtime command failed',
+                limit=300,
+            )
             if runtime == 'opencode' and _is_opencode_session_not_found(err):
                 final_status = 'opencode-session-stale'
                 log.warning(f'⚠️ {task_id} OpenCode session registry 异常，准备重启 server 后重试')
@@ -5907,7 +6084,11 @@ def _execute_dispatch_outbox_item(item):
         }, confidence='low', trace_id=trace_id)
         _outbox_mark_failed(dispatch_id, err, {'status': final_status})
     except subprocess.TimeoutExpired as exc:
-        timeout_error = _clean_runtime_error(getattr(exc, 'stderr', '') or getattr(exc, 'output', '') or 'timeout', limit=300)
+        timeout_error = _runtime_error_summary(
+            getattr(exc, 'stderr', '') or getattr(exc, 'output', ''),
+            default=f'{runtime_label} 派发超时（{agent_id}，{trigger}）',
+            limit=300,
+        )
         log.error(f'❌ {task_id} 自动派发超时 → {agent_id}')
         _update_if_current(
             'timeout',
