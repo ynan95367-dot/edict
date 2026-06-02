@@ -1104,6 +1104,33 @@ def test_capability_registry_defaults_when_file_missing(tmp_path, monkeypatch):
     assert 'runtime.opencode' in ids
     assert 'governance.plan' in ids
     assert any(cat['id'] == 'browser' for cat in result['categories'])
+    shell = next(item for item in result['capabilities'] if item['id'] == 'shell.command')
+    assert 'shell.execute' in shell['permissions']
+    assert shell['requiresApproval'] is True
+    assert shell['availability']['status'] == 'ready'
+    opencode = next(item for item in result['capabilities'] if item['id'] == 'runtime.opencode')
+    assert opencode['availability']['status'] in {'ready', 'configured', 'missing'}
+
+
+def test_preview_run_spec_includes_tool_policy(tmp_path, monkeypatch):
+    import server as srv
+
+    data = tmp_path / 'data'
+    data.mkdir()
+    monkeypatch.setattr(srv, 'DATA', data)
+
+    result = srv.preview_run_spec({
+        'goal': '运行 pytest 检查当前仓库并修复前端构建问题',
+        'mode': 'execute',
+        'deliverable': '补丁和验证结果',
+    })
+
+    assert result['ok'] is True
+    run = result['run']
+    assert 'shell.command' in run['requiredCapabilities']
+    assert 'shell.execute' in run['toolPolicy']['permissions']
+    assert run['toolPolicy']['requiresApproval'] is True
+    assert any(item['id'] == 'shell.command' for item in run['capabilityPolicies'])
 
 
 def test_create_run_spec_creates_task_and_persists_mapping(tmp_path, monkeypatch):

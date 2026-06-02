@@ -18,7 +18,7 @@ import {
   Workflow,
   type LucideIcon,
 } from 'lucide-react';
-import { api, type CapabilityInfo, type RunSpec } from '../api';
+import { api, type CapabilityInfo, type CapabilityPolicy, type RunSpec } from '../api';
 import { useStore } from '../store';
 
 type RunMode = 'auto' | 'plan' | 'execute' | 'interactive';
@@ -69,6 +69,38 @@ const statusLabel: Record<string, string> = {
   waiting_review: '等待审议',
   waiting_clarification: '等待补充',
 };
+
+const availabilityFallback: Record<string, string> = {
+  ready: '可用',
+  configured: '已配置',
+  missing: '待配置',
+  unknown: '按任务连接',
+};
+
+const permissionFallback: Record<string, string> = {
+  'agent.run': '调用 Agent',
+  'workspace.read': '读工作区',
+  'workspace.write': '写工作区',
+  'shell.execute': '执行命令',
+  'browser.control': '控制浏览器',
+  'network.local': '本地服务',
+  'network.web': '访问网络',
+  'document.read': '读文档',
+  'document.write': '写文档',
+  'artifact.write': '沉淀产物',
+  'policy.review': '治理审议',
+};
+
+function availabilityClass(status?: string) {
+  if (status === 'ready' || status === 'configured' || status === 'missing') return status;
+  return 'unknown';
+}
+
+function permissionLabels(item?: Pick<CapabilityInfo, 'permissions' | 'permissionLabels'> | Pick<CapabilityPolicy, 'permissions' | 'permissionLabels'>) {
+  if (!item) return [];
+  if (item.permissionLabels?.length) return item.permissionLabels;
+  return (item.permissions || []).map((perm) => permissionFallback[perm] || perm);
+}
 
 export default function CommandCenter() {
   const toast = useStore((s) => s.toast);
@@ -179,6 +211,13 @@ export default function CommandCenter() {
   const previewConstraints = previewRun?.constraints || '等待目标后自动生成';
   const previewTitle = previewRun?.title || goal.trim().split(/\n+/)[0] || '等待输入目标';
   const previewStatus = previewRun?.status || 'preview';
+  const capabilityPolicies = previewRun?.capabilityPolicies || selectedCaps;
+  const hasToolPolicy = !!previewRun?.toolPolicy;
+  const toolPermissions = previewRun?.toolPolicy?.permissionLabels?.length
+    ? previewRun.toolPolicy.permissionLabels
+    : Array.from(new Set(capabilityPolicies.flatMap((item) => permissionLabels(item))));
+  const unavailableCaps = previewRun?.toolPolicy?.unavailableCapabilities || [];
+  const unknownCaps = previewRun?.toolPolicy?.unknownCapabilities || [];
   const clarification = previewRun?.clarification || previewRun?.profile?.clarification;
   const intentReason = previewLoading
     ? '正在识别目标...'
@@ -427,17 +466,28 @@ export default function CommandCenter() {
                         {items[0]?.categoryLabel || category}
                       </div>
                       <div className="cmd-cap-list">
-                        {items.map((cap) => (
-                          <button
-                            type="button"
-                            key={cap.id}
-                            className={`cmd-cap ${effectiveIds.includes(cap.id) ? 'active' : ''}`}
-                            onClick={() => toggleCapability(cap.id)}
-                          >
-                            <span>{cap.name}</span>
-                            <small>{cap.risk}</small>
-                          </button>
-                        ))}
+                        {items.map((cap) => {
+                          const status = availabilityClass(cap.availability?.status);
+                          const labels = permissionLabels(cap).slice(0, 2);
+                          return (
+                            <button
+                              type="button"
+                              key={cap.id}
+                              className={`cmd-cap ${effectiveIds.includes(cap.id) ? 'active' : ''} ${status}`}
+                              onClick={() => toggleCapability(cap.id)}
+                              title={cap.availability?.reason || cap.description}
+                            >
+                              <div className="cmd-cap-main">
+                                <span>{cap.name}</span>
+                                <small>{riskLabel[cap.risk] || cap.risk}</small>
+                              </div>
+                              <div className="cmd-cap-meta">
+                                <b>{cap.availability?.label || availabilityFallback[status]}</b>
+                                {!!labels.length && <i>{labels.join(' / ')}</i>}
+                              </div>
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
                   );
@@ -504,6 +554,31 @@ export default function CommandCenter() {
               <span key={cap.id}>{cap.name}</span>
             )) : <em>等待目标</em>}
           </div>
+        </div>
+
+        <div className="cmd-preview-block">
+          <div className="cmd-block-title">工具权限</div>
+          <div className="cmd-policy-head">
+            <span className={`cmd-policy-state ${hasToolPolicy && previewRun?.toolPolicy?.requiresApproval ? 'review' : 'auto'}`}>
+              {!hasToolPolicy ? '等待目标' : previewRun?.toolPolicy?.requiresApproval ? '需确认' : '可自动分发'}
+            </span>
+            <small>{previewRun?.toolPolicy?.approvalReason || '等待目标后自动生成权限摘要'}</small>
+          </div>
+          <div className="cmd-policy-tags">
+            {toolPermissions.length ? toolPermissions.slice(0, 8).map((item) => (
+              <span key={item}>{item}</span>
+            )) : <em>等待目标</em>}
+          </div>
+          {!!unavailableCaps.length && (
+            <div className="cmd-policy-note">
+              待配置：{unavailableCaps.map((item) => item.name || item.id).join('、')}
+            </div>
+          )}
+          {!!unknownCaps.length && !unavailableCaps.length && (
+            <div className="cmd-policy-note muted">
+              任务中确认：{unknownCaps.map((item) => item.name || item.id).join('、')}
+            </div>
+          )}
         </div>
 
         <div className="cmd-preview-block">

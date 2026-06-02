@@ -1751,6 +1751,76 @@ def _run_specs_file():
     return DATA / 'run_specs.json'
 
 
+_PERMISSION_LABELS = {
+    'agent.run': '调用 Agent',
+    'workspace.read': '读工作区',
+    'workspace.write': '写工作区',
+    'shell.execute': '执行命令',
+    'browser.control': '控制浏览器',
+    'network.local': '访问本地服务',
+    'network.web': '访问网络',
+    'document.read': '读文档',
+    'document.write': '写文档',
+    'artifact.write': '沉淀产物',
+    'policy.review': '治理审议',
+}
+
+_APPROVAL_PERMISSIONS = {'shell.execute'}
+
+
+def _ordered_unique(items):
+    seen = set()
+    out = []
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _permission_labels(permissions):
+    return [_PERMISSION_LABELS.get(item, item) for item in permissions or []]
+
+
+def _capability_availability(capability):
+    """Lightweight capability availability hints for the command center."""
+    cap_id = capability.get('id', '')
+    active_runtime = _agent_runtime()
+
+    if cap_id == 'runtime.opencode':
+        configured = bool(_resolve_opencode_bin() or (PROJECT_ROOT / 'opencode.json').exists())
+        if configured and active_runtime == 'opencode':
+            return {'status': 'ready', 'label': '当前运行时', 'reason': 'OpenCode 已作为当前 agent runtime'}
+        if configured:
+            return {'status': 'configured', 'label': '已配置', 'reason': 'OpenCode CLI 或配置已存在，可切换使用'}
+        return {'status': 'missing', 'label': '待配置', 'reason': '未找到 opencode CLI 或 opencode.json'}
+
+    if cap_id == 'runtime.openclaw':
+        configured = bool(_resolve_openclaw_bin() or (OCLAW_HOME / 'openclaw.json').exists())
+        if configured and active_runtime == 'openclaw':
+            return {'status': 'ready', 'label': '当前运行时', 'reason': 'OpenClaw 已作为当前 agent runtime'}
+        if configured:
+            return {'status': 'configured', 'label': '已配置', 'reason': 'OpenClaw CLI 或配置已存在，可切换使用'}
+        return {'status': 'missing', 'label': '待配置', 'reason': '未找到 openclaw CLI 或 ~/.openclaw/openclaw.json'}
+
+    if cap_id == 'code.workspace':
+        if (PROJECT_ROOT / '.git').exists():
+            return {'status': 'ready', 'label': '可用', 'reason': '当前目录是可追踪代码工作区'}
+        return {'status': 'configured', 'label': '工作区可读', 'reason': '未检测到 git 仓库，但工作区目录存在'}
+
+    if cap_id in ('file.workspace', 'shell.command', 'artifact.outputs', 'governance.plan'):
+        return {'status': 'ready', 'label': '可用', 'reason': '由本地看板和当前工作区提供'}
+
+    if cap_id == 'browser.control':
+        return {'status': 'unknown', 'label': '按任务连接', 'reason': '浏览器连接器由执行 agent 在任务中确认'}
+
+    if cap_id == 'document.office':
+        return {'status': 'unknown', 'label': '按任务连接', 'reason': '文档能力由执行 agent 或本地依赖在任务中确认'}
+
+    return {'status': 'unknown', 'label': '未知', 'reason': '自定义能力未提供可用性探测'}
+
+
 def _default_capabilities():
     return {
         'categories': [
@@ -1775,6 +1845,7 @@ def _default_capabilities():
                 'tags': ['agent', 'runtime', 'code'],
                 'inputs': ['goal', 'workspace'],
                 'outputs': ['events', 'patches', 'artifacts'],
+                'permissions': ['agent.run', 'workspace.read', 'workspace.write', 'artifact.write'],
             },
             {
                 'id': 'runtime.openclaw',
@@ -1787,6 +1858,7 @@ def _default_capabilities():
                 'tags': ['agent', 'runtime'],
                 'inputs': ['goal', 'agent'],
                 'outputs': ['events', 'artifacts'],
+                'permissions': ['agent.run', 'workspace.read', 'workspace.write', 'artifact.write'],
             },
             {
                 'id': 'code.workspace',
@@ -1799,6 +1871,7 @@ def _default_capabilities():
                 'tags': ['repo', 'patch', 'test'],
                 'inputs': ['path', 'diff', 'goal'],
                 'outputs': ['patch', 'testResult'],
+                'permissions': ['workspace.read', 'workspace.write'],
             },
             {
                 'id': 'file.workspace',
@@ -1811,6 +1884,7 @@ def _default_capabilities():
                 'tags': ['file', 'output', 'link'],
                 'inputs': ['path', 'content'],
                 'outputs': ['fileLink', 'artifact'],
+                'permissions': ['workspace.read', 'workspace.write', 'artifact.write'],
             },
             {
                 'id': 'shell.command',
@@ -1823,6 +1897,8 @@ def _default_capabilities():
                 'tags': ['terminal', 'test', 'service'],
                 'inputs': ['command', 'cwd'],
                 'outputs': ['stdout', 'stderr', 'exitCode'],
+                'permissions': ['shell.execute', 'workspace.read', 'workspace.write'],
+                'requiresApproval': True,
             },
             {
                 'id': 'browser.control',
@@ -1835,6 +1911,7 @@ def _default_capabilities():
                 'tags': ['web', 'ui', 'verify'],
                 'inputs': ['url', 'action'],
                 'outputs': ['screenshot', 'console', 'network'],
+                'permissions': ['browser.control', 'network.local', 'network.web'],
             },
             {
                 'id': 'document.office',
@@ -1847,6 +1924,7 @@ def _default_capabilities():
                 'tags': ['pdf', 'docx', 'pptx', 'xlsx'],
                 'inputs': ['file', 'instruction'],
                 'outputs': ['document', 'preview', 'report'],
+                'permissions': ['document.read', 'document.write', 'workspace.read', 'workspace.write'],
             },
             {
                 'id': 'artifact.outputs',
@@ -1859,6 +1937,7 @@ def _default_capabilities():
                 'tags': ['output', 'trace', 'memory'],
                 'inputs': ['taskId', 'file'],
                 'outputs': ['artifactIndex', 'taskOutput'],
+                'permissions': ['artifact.write', 'workspace.read'],
             },
             {
                 'id': 'governance.plan',
@@ -1871,6 +1950,7 @@ def _default_capabilities():
                 'tags': ['runspec', 'policy', 'review'],
                 'inputs': ['goal', 'risk'],
                 'outputs': ['runGraph', 'policyDecision'],
+                'permissions': ['policy.review'],
             },
         ],
     }
@@ -1885,17 +1965,34 @@ def list_capabilities():
     categories = data.get('categories') if isinstance(data.get('categories'), list) else default['categories']
     capabilities = data.get('capabilities') if isinstance(data.get('capabilities'), list) else default['capabilities']
     category_labels = {c.get('id'): c.get('label', c.get('id', '')) for c in categories if isinstance(c, dict)}
+    default_capabilities = {
+        cap.get('id'): cap for cap in default['capabilities']
+        if isinstance(cap, dict) and cap.get('id')
+    }
     normalized = []
     for cap in capabilities:
         if not isinstance(cap, dict) or not cap.get('id'):
             continue
+        default_cap = default_capabilities.get(cap.get('id'), {})
         item = dict(cap)
         item['enabled'] = bool(item.get('enabled', True))
         item['categoryLabel'] = category_labels.get(item.get('category'), item.get('category', ''))
-        item.setdefault('tags', [])
-        item.setdefault('adapters', [])
-        item.setdefault('inputs', [])
-        item.setdefault('outputs', [])
+        item.setdefault('tags', default_cap.get('tags', []))
+        item.setdefault('adapters', default_cap.get('adapters', []))
+        item.setdefault('inputs', default_cap.get('inputs', []))
+        item.setdefault('outputs', default_cap.get('outputs', []))
+        permissions = item.get('permissions') if isinstance(item.get('permissions'), list) else []
+        if not permissions:
+            permissions = default_cap.get('permissions', [])
+        item['permissions'] = _ordered_unique(str(perm) for perm in permissions)
+        item['permissionLabels'] = _permission_labels(item['permissions'])
+        default_requires_approval = bool(default_cap.get('requiresApproval', False))
+        item['requiresApproval'] = bool(
+            item.get('requiresApproval', default_requires_approval)
+            or item.get('risk') == 'high'
+            or any(perm in _APPROVAL_PERMISSIONS for perm in item['permissions'])
+        )
+        item['availability'] = _capability_availability(item)
         normalized.append(item)
     return {'ok': True, 'generatedAt': now_iso(), 'categories': categories, 'capabilities': normalized}
 
@@ -1911,15 +2008,69 @@ def _capability_category(cap_id):
     return ''
 
 
-def _ordered_unique(items):
-    seen = set()
-    out = []
-    for item in items:
-        if not item or item in seen:
-            continue
-        seen.add(item)
-        out.append(item)
-    return out
+def _capability_policies_for_run(capability_ids):
+    capability_map = {cap.get('id'): cap for cap in list_capabilities().get('capabilities', [])}
+    policies = []
+    for cap_id in capability_ids:
+        cap = capability_map.get(cap_id, {})
+        permissions = cap.get('permissions') if isinstance(cap.get('permissions'), list) else []
+        policies.append({
+            'id': cap_id,
+            'name': cap.get('name', cap_id),
+            'category': cap.get('category', ''),
+            'categoryLabel': cap.get('categoryLabel', ''),
+            'risk': cap.get('risk', 'medium'),
+            'permissions': permissions,
+            'permissionLabels': cap.get('permissionLabels') or _permission_labels(permissions),
+            'requiresApproval': bool(cap.get('requiresApproval')),
+            'availability': cap.get('availability') or {'status': 'unknown', 'label': '未知', 'reason': ''},
+        })
+    return policies
+
+
+def _tool_policy_for_run(capability_ids, risk_level, mode, policies=None):
+    policies = policies or _capability_policies_for_run(capability_ids)
+    permissions = _ordered_unique(perm for policy in policies for perm in policy.get('permissions', []))
+    unavailable = []
+    unknown = []
+    for policy in policies:
+        availability = policy.get('availability') or {}
+        status = availability.get('status')
+        if status == 'missing':
+            unavailable.append({
+                'id': policy.get('id'),
+                'name': policy.get('name'),
+                'reason': availability.get('reason', ''),
+            })
+        elif status == 'unknown':
+            unknown.append({
+                'id': policy.get('id'),
+                'name': policy.get('name'),
+                'reason': availability.get('reason', ''),
+            })
+    requires_approval = bool(
+        risk_level == 'high'
+        or any(policy.get('requiresApproval') for policy in policies)
+        or mode in ('plan', 'interactive')
+    )
+    if unavailable:
+        approval_reason = '存在待配置能力，执行前需要确认替代路径'
+    elif risk_level == 'high':
+        approval_reason = '高风险或命令执行任务需要人工确认'
+    elif mode == 'plan':
+        approval_reason = '方案模式只生成 RunSpec，等待审议后再执行'
+    elif mode == 'interactive':
+        approval_reason = '目标需要最小补充，确认后再执行'
+    else:
+        approval_reason = '可按 RunSpec 治理链路自动分发'
+    return {
+        'permissions': permissions,
+        'permissionLabels': _permission_labels(permissions),
+        'requiresApproval': requires_approval,
+        'approvalReason': approval_reason,
+        'unavailableCapabilities': unavailable,
+        'unknownCapabilities': unknown,
+    }
 
 
 def _infer_required_capabilities(goal, explicit_ids=None):
@@ -2252,6 +2403,8 @@ def _prepare_run_spec(payload, run_id='RUN-PREVIEW', task_id='', created_at='', 
         deliverable = deliverable_input or _infer_deliverable(goal, run_kind, capability_ids, mode)
         constraints = constraints_input or _infer_constraints(goal, risk_level, mode)
     governance = _governance_for_risk(risk_level, mode)
+    capability_policies = _capability_policies_for_run(capability_ids)
+    tool_policy = _tool_policy_for_run(capability_ids, risk_level, mode, capability_policies)
     profile = {
         'deliverable': {'value': deliverable, 'source': 'user' if deliverable_input else 'inferred'},
         'constraints': {'value': constraints, 'source': 'user' if constraints_input else 'inferred'},
@@ -2289,6 +2442,8 @@ def _prepare_run_spec(payload, run_id='RUN-PREVIEW', task_id='', created_at='', 
         'priority': priority,
         'requestedPriority': requested_priority,
         'requiredCapabilities': capability_ids,
+        'capabilityPolicies': capability_policies,
+        'toolPolicy': tool_policy,
         'riskLevel': risk_level,
         'governance': governance,
         'constraints': constraints,

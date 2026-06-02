@@ -168,6 +168,37 @@ export interface CapabilityInfo {
   tags: string[];
   inputs?: string[];
   outputs?: string[];
+  permissions?: string[];
+  permissionLabels?: string[];
+  requiresApproval?: boolean;
+  availability?: CapabilityAvailability;
+}
+
+export interface CapabilityAvailability {
+  status?: 'ready' | 'configured' | 'missing' | 'unknown' | string;
+  label?: string;
+  reason?: string;
+}
+
+export interface CapabilityPolicy {
+  id: string;
+  name: string;
+  category?: string;
+  categoryLabel?: string;
+  risk?: 'low' | 'medium' | 'high' | string;
+  permissions?: string[];
+  permissionLabels?: string[];
+  requiresApproval?: boolean;
+  availability?: CapabilityAvailability;
+}
+
+export interface ToolPolicy {
+  permissions: string[];
+  permissionLabels?: string[];
+  requiresApproval: boolean;
+  approvalReason?: string;
+  unavailableCapabilities?: { id?: string; name?: string; reason?: string }[];
+  unknownCapabilities?: { id?: string; name?: string; reason?: string }[];
 }
 
 export interface CapabilitiesResult {
@@ -203,6 +234,8 @@ export interface RunSpec {
   targetDept: string;
   priority: string;
   requiredCapabilities: string[];
+  capabilityPolicies?: CapabilityPolicy[];
+  toolPolicy?: ToolPolicy;
   riskLevel: 'low' | 'medium' | 'high' | string;
   governance: GovernanceStage[];
   constraints?: string;
