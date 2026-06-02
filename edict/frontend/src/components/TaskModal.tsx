@@ -3,10 +3,13 @@ import {
   ArrowUpCircle,
   Ban,
   CheckCircle2,
+  Download,
   ExternalLink,
   FileDiff,
+  FileText,
   Pause,
   Play,
+  Package,
   RotateCcw,
   Search,
   SkipForward,
@@ -29,6 +32,7 @@ import type {
   PatchReview,
   SourceFileResult,
   WorktreeCheckpoint,
+  OutputGroup,
 } from '../api';
 
 const AGENT_LABELS: Record<string, string> = {
@@ -118,12 +122,12 @@ function shortTrace(traceId?: string): string {
 }
 
 function outboxLabel(outbox?: { pending?: number; running?: number; failed?: number; total?: number } | null): string {
-  if (!outbox || !outbox.total) return '空';
+  if (!outbox) return '空';
   const parts: string[] = [];
   if (outbox.running) parts.push(`执行${outbox.running}`);
   if (outbox.pending) parts.push(`待发${outbox.pending}`);
   if (outbox.failed) parts.push(`失败${outbox.failed}`);
-  return parts.join(' · ') || `${outbox.total} 条`;
+  return parts.join(' · ') || '空';
 }
 
 export default function TaskModal() {
@@ -523,13 +527,7 @@ export default function TaskModal() {
             </div>
           )}
 
-          {/* Output */}
-          {task.output && task.output !== '-' && task.output !== '' && (
-            <div className="m-section">
-              <div className="m-sec-label">产出物</div>
-              <code>{task.output}</code>
-            </div>
-          )}
+          <TaskOutputSection group={activityData?.outputGroup} outputText={task.output} />
 
           {/* Live Activity */}
           <LiveActivitySection data={activityData} isDone={['Done', 'Cancelled'].includes(task.state)} logRef={logRef} />
@@ -572,6 +570,52 @@ function TodoSection({ todos, todoDone, todoTotal }: { todos: TodoItem[]; todoDo
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function TaskOutputSection({ group, outputText }: { group?: OutputGroup | null; outputText?: string }) {
+  const note = group?.outputText || (outputText && outputText !== '-' ? outputText : '');
+  const files = (group?.files || []).slice(0, 6);
+  if (!note && !files.length) return null;
+
+  return (
+    <div className="task-output-section">
+      <div className="task-output-head">
+        <div>
+          <div className="task-output-title"><Package size={14} />本任务产物</div>
+          <div className="task-output-sub">
+            {files.length ? `${group?.files?.length || files.length} 个文件` : '无文件'}{group?.updatedAt ? ` · ${formatDashboardDateTime(group.updatedAt)}` : ''}
+          </div>
+        </div>
+        {group?.taskId && <span className="task-output-tag">{group.taskId}</span>}
+      </div>
+      {note && <div className="task-output-note">{note}</div>}
+      {!!files.length && (
+        <div className="task-output-list">
+          {files.map((file) => (
+            <div className="task-output-card" key={file.path}>
+              <span className="task-output-icon"><FileText size={15} /></span>
+              <span className="task-output-main">
+                <b>{file.name}</b>
+                <em>{file.kind} · {file.source} · {file.sizeLabel}</em>
+                <code>{file.path}</code>
+              </span>
+              <span className="task-output-actions">
+                <a href={api.outputFileUrl(file.path)} target="_blank" rel="noreferrer" title="打开产物">
+                  <ExternalLink size={14} />
+                </a>
+                <a href={api.outputFileUrl(file.path, true)} title="下载产物">
+                  <Download size={14} />
+                </a>
+              </span>
+            </div>
+          ))}
+          {(group?.files?.length || 0) > files.length && (
+            <div className="task-output-more">还有 {(group?.files?.length || 0) - files.length} 个文件，可到输出文件页查看</div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

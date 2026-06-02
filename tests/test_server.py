@@ -318,6 +318,73 @@ def test_runtime_outbox_retry_requeues_failed_item(tmp_path, monkeypatch):
     assert kicked['value'] is True
 
 
+def test_runtime_outbox_archive_hides_failed_item(tmp_path, monkeypatch):
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    data_dir.joinpath('tasks_source.json').write_text(json.dumps([
+        {'id': 'JJC-FAIL-3', 'title': '待归档失败任务', 'state': 'Taizi'},
+    ], ensure_ascii=False), encoding='utf-8')
+    outbox_path = data_dir / 'runtime_outbox.json'
+    outbox_path.write_text(json.dumps([
+        {
+            'id': 'dispatch_failed',
+            'kind': 'dispatch',
+            'taskId': 'JJC-FAIL-3',
+            'state': 'Taizi',
+            'agentId': 'taizi',
+            'status': 'failed',
+            'attempts': 1,
+            'maxAttempts': 1,
+            'createdAt': '2026-05-31T09:00:00Z',
+            'updatedAt': '2026-05-31T09:01:00Z',
+            'lastError': 'gateway offline',
+        },
+    ], ensure_ascii=False), encoding='utf-8')
+
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
+    monkeypatch.setattr(srv._runtime_outbox, 'OUTBOX_FILE', outbox_path)
+
+    result = srv.handle_runtime_outbox_archive('dispatch_failed', reason='test archive')
+    health = srv.get_runtime_outbox_health()
+    updated = json.loads(outbox_path.read_text(encoding='utf-8'))[0]
+
+    assert result['ok'] is True
+    assert result['count'] == 1
+    assert updated['status'] == 'archived'
+    assert updated['result']['archiveReason'] == 'test archive'
+    assert health['failed'] == 0
+    assert health['archived'] == 1
+    assert health['deadLetters'] == []
+
+
+def test_runtime_outbox_archive_all_failed_items(tmp_path, monkeypatch):
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    data_dir.joinpath('tasks_source.json').write_text('[]', encoding='utf-8')
+    outbox_path = data_dir / 'runtime_outbox.json'
+    outbox_path.write_text(json.dumps([
+        {'id': 'failed_a', 'kind': 'dispatch', 'taskId': 'JJC-A', 'status': 'failed'},
+        {'id': 'failed_b', 'kind': 'dispatch', 'taskId': 'JJC-B', 'status': 'failed'},
+        {'id': 'pending_c', 'kind': 'dispatch', 'taskId': 'JJC-C', 'status': 'pending'},
+    ], ensure_ascii=False), encoding='utf-8')
+
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
+    monkeypatch.setattr(srv._runtime_outbox, 'OUTBOX_FILE', outbox_path)
+
+    result = srv.handle_runtime_outbox_archive(archive_all_failed=True, reason='batch archive')
+    updated = json.loads(outbox_path.read_text(encoding='utf-8'))
+
+    assert result['ok'] is True
+    assert result['count'] == 2
+    assert [item['status'] for item in updated] == ['archived', 'archived', 'pending']
+
+
 def test_runtime_outbox_requeues_orphaned_running_item(tmp_path, monkeypatch):
     import runtime_outbox
 

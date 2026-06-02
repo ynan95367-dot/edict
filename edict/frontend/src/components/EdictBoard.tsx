@@ -255,6 +255,39 @@ export default function EdictBoard() {
     }
   };
 
+  const handleOutboxArchive = async (itemId: string) => {
+    try {
+      const r = await api.runtimeOutboxArchive({ itemId, reason: 'dashboard dead-letter archive' });
+      if (r.ok) {
+        toast(r.message || '失败派发已归档');
+        loadAll();
+      } else {
+        toast(r.error || '归档失败', 'err');
+      }
+    } catch {
+      toast('服务器连接失败', 'err');
+    }
+  };
+
+  const handleOutboxArchiveAll = async () => {
+    if (!confirm(`归档全部 ${runtimeOutbox?.failed || 0} 条失败派发？归档后不再显示在死信面板，但仍保留追溯记录。`)) return;
+    try {
+      const r = await api.runtimeOutboxArchive({ archiveAllFailed: true, reason: 'dashboard dead-letter archive all' });
+      if (r.ok) {
+        toast(`已归档 ${r.count || 0} 条失败派发`);
+        loadAll();
+      } else {
+        toast(r.error || '归档失败', 'err');
+      }
+    } catch {
+      toast('服务器连接失败', 'err');
+    }
+  };
+
+  const deadWindow = runtimeOutbox?.deadLetterWindow;
+  const deadReturned = deadWindow?.returned || runtimeOutbox?.deadLetters?.length || 0;
+  const deadTotal = deadWindow?.total || runtimeOutbox?.failed || 0;
+
   return (
     <div>
       {!!runtimeOutbox?.failed && (
@@ -264,14 +297,20 @@ export default function EdictBoard() {
               <div className="dl-title">派发死信</div>
               <div className="dl-sub">
                 {runtimeOutbox.failed} 个 outbox 项失败，最常见原因是运行时未启动、CLI 缺失或 Agent 会话报错。
+                {deadWindow?.truncated && ` 当前显示 ${deadReturned}/${deadTotal} 条。`}
               </div>
             </div>
-            <button className="dl-scan" type="button" onClick={handleScan}>
-              <Compass size={13} />巡检
-            </button>
+            <div className="dl-head-actions">
+              <button className="dl-scan" type="button" onClick={handleScan}>
+                <Compass size={13} />巡检
+              </button>
+              <button className="dl-archive-all" type="button" onClick={handleOutboxArchiveAll}>
+                <FolderArchive size={13} />归档全部
+              </button>
+            </div>
           </div>
           <div className="dl-list">
-            {runtimeOutbox.deadLetters.slice(0, 5).map((item) => (
+            {runtimeOutbox.deadLetters.map((item) => (
               <div className="dl-item" key={item.id}>
                 <button className="dl-main" type="button" onClick={() => item.taskId && setModalTaskId(item.taskId)}>
                   <span className="dl-id">{item.taskId || item.id}</span>
@@ -281,9 +320,14 @@ export default function EdictBoard() {
                   </span>
                 </button>
                 <span className="dl-error">{item.lastError || '无错误详情'}</span>
-                <button className="dl-retry" type="button" onClick={() => handleOutboxRetry(item.id)}>
-                  <RotateCcw size={13} />重新入队
-                </button>
+                <div className="dl-actions">
+                  <button className="dl-retry" type="button" onClick={() => handleOutboxRetry(item.id)}>
+                    <RotateCcw size={13} />重试
+                  </button>
+                  <button className="dl-archive" type="button" onClick={() => handleOutboxArchive(item.id)}>
+                    <Archive size={13} />归档
+                  </button>
+                </div>
               </div>
             ))}
           </div>

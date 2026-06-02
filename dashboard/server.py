@@ -34,6 +34,7 @@ from runtime_outbox import (
     mark_done as _outbox_mark_done,
     mark_failed as _outbox_mark_failed,
     requeue_failed as _outbox_requeue_failed,
+    archive_failed as _outbox_archive_failed,
     requeue_orphaned_running as _outbox_requeue_orphaned_running,
     compact_unfinished_duplicates as _outbox_compact_unfinished_duplicates,
     task_summary as _outbox_task_summary,
@@ -3398,6 +3399,7 @@ def get_runtime_outbox_health(limit=8):
     task_map = {t.get('id', ''): t for t in load_tasks()}
     failed_sorted = sorted(failed, key=lambda x: x.get('updatedAt') or x.get('createdAt') or '', reverse=True)
     active_sorted = sorted(unfinished, key=lambda x: x.get('createdAt') or x.get('updatedAt') or '')
+    dead_letters = failed_sorted[:limit]
     latest = max(items, key=lambda x: x.get('updatedAt') or x.get('createdAt') or '', default={})
     return {
         'ok': True,
@@ -3411,12 +3413,18 @@ def get_runtime_outbox_health(limit=8):
         'pending': counts.get('pending', 0),
         'running': counts.get('running', 0),
         'failed': counts.get('failed', 0),
+        'archived': counts.get('archived', 0),
         'done': counts.get('done', 0),
         'oldestPendingAgeSec': oldest_pending,
         'oldestPendingAgeText': _duration_text(oldest_pending),
         'latest': _public_outbox_item(latest, task_map, now_dt) if latest else {},
         'activeItems': [_public_outbox_item(x, task_map, now_dt) for x in active_sorted[:limit]],
-        'deadLetters': [_public_outbox_item(x, task_map, now_dt) for x in failed_sorted[:limit]],
+        'deadLetters': [_public_outbox_item(x, task_map, now_dt) for x in dead_letters],
+        'deadLetterWindow': {
+            'total': len(failed_sorted),
+            'returned': len(dead_letters),
+            'truncated': len(failed_sorted) > len(dead_letters),
+        },
     }
 
 
@@ -3436,6 +3444,29 @@ def handle_runtime_outbox_retry(item_id, reason=''):
     }, trace_id=item.get('traceId', ''))
     _kick_dispatch_worker()
     return {'ok': True, 'message': '已重新入队', 'item': _public_outbox_item(item, {item.get('taskId', ''): next((t for t in load_tasks() if t.get('id') == item.get('taskId')), {})})}
+
+
+def handle_runtime_outbox_archive(item_id='', archive_all_failed=False, task_id='', reason=''):
+    if not item_id and not archive_all_failed and not task_id:
+        return {'ok': False, 'error': 'itemId, taskId or archiveAllFailed required'}
+    result = _outbox_archive_failed(
+        item_id,
+        task_id=task_id if not item_id else '',
+        reason=reason or 'dashboard dead-letter archive',
+    )
+    if not result.get('ok'):
+        return result
+    count = int(result.get('count') or 0)
+    first = (result.get('items') or [{}])[0] if isinstance(result.get('items'), list) else {}
+    _append_runtime_event('outbox_archived', first.get('taskId', '') or task_id, first.get('agentId', ''), {
+        'outboxId': item_id,
+        'taskId': task_id,
+        'archiveAllFailed': bool(archive_all_failed),
+        'count': count,
+        'reason': reason or 'dashboard dead-letter archive',
+        'remark': f'已归档 {count} 条失败派发',
+    }, trace_id=first.get('traceId', ''))
+    return {'ok': True, 'message': f'已归档 {count} 条失败派发', 'count': count}
 
 
 def get_scheduler_state(task_id):
@@ -5389,6 +5420,7 @@ def get_task_activity(task_id):
     updated_at = task.get('updatedAt', '')
     trace_id = _ensure_trace_id(task)
     outbox_summary = _outbox_task_summary(task_id)
+    output_group = _task_output_group(task_id)
 
     # ── 任务元信息 ──
     task_meta = {
@@ -5664,6 +5696,7 @@ def get_task_activity(task_id):
         'activityWindow': activity_window,
         'activitySource': 'progress+session+event-ledger' if ledger_events else 'progress+session',
         'relatedAgents': _normalize_related_agents(related_agents),
+        'outputGroup': output_group,
         'phaseDurations': phase_durations,
         'totalDuration': total_duration,
         'stateEvidence': _build_state_evidence(task, ledger_events, full_activity),
@@ -6658,6 +6691,15 @@ class Handler(BaseHTTPRequestHandler):
             item_id = body.get('itemId', '').strip() if isinstance(body.get('itemId'), str) else ''
             reason = body.get('reason', '').strip() if isinstance(body.get('reason'), str) else ''
             result = handle_runtime_outbox_retry(item_id, reason)
+            self.send_json(result, 200 if result.get('ok') else 400)
+            return
+
+        if p == '/api/runtime-outbox/archive':
+            item_id = body.get('itemId', '').strip() if isinstance(body.get('itemId'), str) else ''
+            task_id = body.get('taskId', '').strip() if isinstance(body.get('taskId'), str) else ''
+            reason = body.get('reason', '').strip() if isinstance(body.get('reason'), str) else ''
+            archive_all_failed = bool(body.get('archiveAllFailed'))
+            result = handle_runtime_outbox_archive(item_id, archive_all_failed, task_id, reason)
             self.send_json(result, 200 if result.get('ok') else 400)
             return
 

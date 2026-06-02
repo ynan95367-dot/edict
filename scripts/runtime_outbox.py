@@ -18,7 +18,7 @@ from file_lock import atomic_json_read, atomic_json_update
 
 _BASE = pathlib.Path(os.environ['EDICT_HOME']) if 'EDICT_HOME' in os.environ else pathlib.Path(__file__).resolve().parent.parent
 OUTBOX_FILE = pathlib.Path(os.environ.get('EDICT_RUNTIME_OUTBOX', str(_BASE / 'data' / 'runtime_outbox.json')))
-_FINISHED_STATUSES = {'done', 'failed', 'cancelled'}
+_FINISHED_STATUSES = {'done', 'failed', 'cancelled', 'archived'}
 
 
 def now_iso() -> str:
@@ -337,6 +337,59 @@ def requeue_failed(item_id: str, reason: str = '') -> dict[str, Any]:
     return outcome
 
 
+def archive_failed(item_id: str = '', *, task_id: str = '', reason: str = '', limit: int = 0) -> dict[str, Any]:
+    """Hide failed items from the active dead-letter view without deleting history."""
+    ts = now_iso()
+    outcome: dict[str, Any] = {'ok': False, 'error': 'item not found'}
+    archived: list[dict[str, Any]] = []
+
+    def _matches(item: dict[str, Any]) -> bool:
+        if item_id and item.get('id') != item_id:
+            return False
+        if task_id and item.get('taskId') != task_id:
+            return False
+        return item.get('status') == 'failed'
+
+    def _archive(item: dict[str, Any]) -> None:
+        result = item.get('result') if isinstance(item.get('result'), dict) else {}
+        result['previousStatus'] = item.get('status', '')
+        result['archivedAt'] = ts
+        if reason:
+            result['archiveReason'] = reason[:200]
+        item['result'] = result
+        item['status'] = 'archived'
+        item['updatedAt'] = ts
+        item['finishedAt'] = item.get('finishedAt') or ts
+        item.pop('claimedBy', None)
+        archived.append(dict(item))
+
+    def _update(items):
+        nonlocal outcome
+        items = items if isinstance(items, list) else []
+        if item_id:
+            for item in items:
+                if not isinstance(item, dict) or item.get('id') != item_id:
+                    continue
+                if item.get('status') != 'failed':
+                    outcome = {'ok': False, 'error': f'item status is {item.get("status", "unknown")}, not failed'}
+                    return items
+                _archive(item)
+                outcome = {'ok': True, 'count': 1, 'items': archived}
+                return items
+            return items
+
+        candidates = [item for item in items if isinstance(item, dict) and _matches(item)]
+        if limit and limit > 0:
+            candidates = candidates[-limit:]
+        for item in candidates:
+            _archive(item)
+        outcome = {'ok': True, 'count': len(archived), 'items': archived}
+        return items
+
+    atomic_json_update(OUTBOX_FILE, _update, [])
+    return outcome
+
+
 def _mark(item_id: str, status: str, *, error: str = '', result: dict[str, Any] | None = None) -> bool:
     found = [False]
     ts = now_iso()
@@ -348,7 +401,7 @@ def _mark(item_id: str, status: str, *, error: str = '', result: dict[str, Any] 
                 continue
             item['status'] = status
             item['updatedAt'] = ts
-            if status in {'done', 'failed', 'cancelled'}:
+            if status in _FINISHED_STATUSES:
                 item['finishedAt'] = ts
                 item.pop('claimedBy', None)
             if error:

@@ -93,6 +93,8 @@ export const api = {
     postJ<ActionResult>(`${API_BASE}/api/scheduler-rollback`, { taskId, reason }),
   runtimeOutboxRetry: (itemId: string, reason = 'manual retry from dashboard') =>
     postJ<ActionResult & { item?: RuntimeOutboxItem }>(`${API_BASE}/api/runtime-outbox/retry`, { itemId, reason }),
+  runtimeOutboxArchive: (params: { itemId?: string; taskId?: string; archiveAllFailed?: boolean; reason?: string }) =>
+    postJ<ActionResult & { count?: number }>(`${API_BASE}/api/runtime-outbox/archive`, params),
   patchReviews: (taskId: string) =>
     fetchJ<{ ok: boolean; taskId: string; reviews: PatchReview[] }>(
       `${API_BASE}/api/patch-reviews/${encodeURIComponent(taskId)}`
@@ -490,12 +492,14 @@ export interface RuntimeOutboxHealth {
   pending: number;
   running: number;
   failed: number;
+  archived?: number;
   done: number;
   oldestPendingAgeSec: number;
   oldestPendingAgeText: string;
   latest?: RuntimeOutboxItem;
   activeItems: RuntimeOutboxItem[];
   deadLetters: RuntimeOutboxItem[];
+  deadLetterWindow?: { total?: number; returned?: number; truncated?: boolean };
 }
 
 export interface MorningNewsItem {
@@ -733,6 +737,7 @@ export interface TaskActivityData {
   activity?: ActivityEntry[];
   activityWindow?: { total?: number; returned?: number; truncated?: boolean };
   relatedAgents?: string[];
+  outputGroup?: OutputGroup | null;
   agentLabel?: string;
   lastActive?: string;
   phaseDurations?: PhaseDuration[];
