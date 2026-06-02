@@ -6171,6 +6171,35 @@ def _execute_dispatch_outbox_item(item):
             if model:
                 cmd.extend(['--model', model])
             cmd.append(msg)
+            if not _opencode_session_probe(agent_id):
+                err = 'OpenCode session probe failed before dispatch'
+                log.warning(f'⚠️ {task_id} OpenCode session 预检失败，准备重启 server 后派发')
+                _record_opencode_session_recovery(task_id, agent_id, trigger, dispatch_id, 0, err, trace_id)
+                if not _restart_opencode_server():
+                    _update_if_current(
+                        'opencode-session-stale',
+                        error=err,
+                        flow_remark=f'派发前 OpenCode 会话预检失败：{agent_id}（{trigger}）',
+                    )
+                    _append_runtime_event('dispatch_failed', task_id, agent_id, {
+                        'from': runtime_label,
+                        'to': agent_id,
+                        'trigger': trigger,
+                        'status': 'opencode-session-stale',
+                        'dispatchId': dispatch_id,
+                        'remark': f'派发前 OpenCode 会话预检失败: {agent_id}（{trigger}）',
+                        'error': err,
+                    }, confidence='low', trace_id=trace_id)
+                    _outbox_mark_failed(dispatch_id, err, {'status': 'opencode-session-stale'})
+                    return
+                _append_runtime_event('dispatch_runtime_recovered', task_id, agent_id, {
+                    'from': runtime_label,
+                    'to': agent_id,
+                    'trigger': trigger,
+                    'status': 'opencode-session-recovered',
+                    'dispatchId': dispatch_id,
+                    'remark': 'OpenCode session 预检失败，已重启 server 并继续派发',
+                }, confidence='medium', trace_id=trace_id)
         else:
             agent_cfg = read_json(DATA / 'agent_config.json', {})
             channel = (agent_cfg.get('dispatchChannel') or '').strip()
