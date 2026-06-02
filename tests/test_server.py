@@ -418,6 +418,7 @@ def test_scheduler_state_exposes_opencode_session_diagnosis(tmp_path, monkeypatc
     assert diag['retryable'] is True
     assert diag['action'] == 'retry'
     assert diag['actionLabel'] == '重试派发'
+    assert 'OpenCode 会话失效' in diag['actionReason']
     assert 'Session not found' in diag['detail']
 
 
@@ -459,6 +460,7 @@ def test_scheduler_state_warns_when_success_dispatch_stalls(tmp_path, monkeypatc
     assert diag['retryable'] is True
     assert diag['action'] == 'scan'
     assert diag['actionLabel'] == '立即扫描'
+    assert '已派发但未推进' in diag['actionReason']
     assert '立即扫描' in diag['nextAction']
 
 

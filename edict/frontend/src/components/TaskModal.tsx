@@ -324,7 +324,7 @@ export default function TaskModal() {
     }
   };
 
-  const doSchedAction = async (action: string) => {
+  const doSchedAction = async (action: string, reasonOverride?: string) => {
     if (!['scan', 'retry', 'escalate', 'rollback'].includes(action)) return;
     if (action === 'scan') {
       try {
@@ -338,8 +338,8 @@ export default function TaskModal() {
       return;
     }
     const labels: Record<string, string> = { retry: '重试', escalate: '升级', rollback: '回滚' };
-    const reason = prompt(`请输入${labels[action]}原因（可留空）：`);
-    if (reason === null) return;
+    const reason = reasonOverride ?? prompt(`请输入${labels[action]}原因（可留空）：`);
+    if (reason === null || reason === undefined) return;
     const handlers: Record<string, (id: string, r: string) => Promise<{ ok: boolean; message?: string; error?: string }>> = {
       retry: api.schedulerRetry,
       escalate: api.schedulerEscalate,
@@ -468,7 +468,7 @@ export default function TaskModal() {
                 <span>{dispatchDiagnosis.detail || '等待调度信息'}</span>
                 {dispatchDiagnosis.nextAction && <em>{dispatchDiagnosis.nextAction}</em>}
                 {canRunDiagnosisAction && (
-                  <button type="button" onClick={() => doSchedAction(diagnosisAction || '')}>
+                  <button type="button" onClick={() => doSchedAction(diagnosisAction || '', dispatchDiagnosis.actionReason || dispatchDiagnosis.detail || dispatchDiagnosis.label || '')}>
                     {dispatchDiagnosis.actionLabel || '处理'}
                   </button>
                 )}

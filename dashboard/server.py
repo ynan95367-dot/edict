@@ -3671,6 +3671,7 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'nextAction': '查看执行回顾或输出文件',
             'action': 'none',
             'actionLabel': '',
+            'actionReason': '',
             'retryable': False,
         }
     if sched.get('enabled') is False:
@@ -3681,6 +3682,7 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'nextAction': '需要继续时先恢复调度或手动推进',
             'action': 'none',
             'actionLabel': '',
+            'actionReason': '',
             'retryable': False,
         }
     if failed:
@@ -3691,6 +3693,7 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'nextAction': '点击重试派发；确认无效后归档失败项',
             'action': 'retry',
             'actionLabel': '重试派发',
+            'actionReason': '诊断显示存在失败派发，按建议重新入队',
             'retryable': True,
         }
     if status in {'gateway-offline', 'opencode-missing', 'openclaw-missing'}:
@@ -3701,6 +3704,7 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'nextAction': '先启动运行时或修复 CLI 配置，再重试派发',
             'action': 'retry',
             'actionLabel': '重试派发',
+            'actionReason': '诊断显示运行时不可用，修复后按建议重试派发',
             'retryable': True,
         }
     if status in {'failed', 'timeout', 'error'}:
@@ -3711,6 +3715,7 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'nextAction': '点击重试派发，必要时升级协调',
             'action': 'retry',
             'actionLabel': '重试派发',
+            'actionReason': '诊断显示最近派发失败，按建议重试',
             'retryable': True,
         }
     if status == 'opencode-session-stale':
@@ -3721,6 +3726,7 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'nextAction': '等待自愈完成；若仍无进展，手动重试派发',
             'action': 'retry',
             'actionLabel': '重试派发',
+            'actionReason': '诊断显示 OpenCode 会话失效，按建议重试派发',
             'retryable': True,
         }
     if active_dispatch or pending or running or status == 'queued':
@@ -3731,6 +3737,7 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'nextAction': '短暂等待；超过阈值后执行立即扫描或重试',
             'action': 'scan',
             'actionLabel': '立即扫描',
+            'actionReason': '诊断显示派发处理中，按建议扫描运行证据',
             'retryable': False,
         }
     if status in {'success', 'progress'}:
@@ -3742,6 +3749,7 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
                 'nextAction': '先立即扫描；仍无证据再重试派发',
                 'action': 'scan',
                 'actionLabel': '立即扫描',
+                'actionReason': '诊断显示已派发但未推进，按建议扫描运行证据',
                 'retryable': True,
             }
         return {
@@ -3751,6 +3759,7 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'nextAction': '等待 Agent 继续回写进展',
             'action': 'none',
             'actionLabel': '',
+            'actionReason': '',
             'retryable': False,
         }
     if expected_agent:
@@ -3761,6 +3770,7 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'nextAction': '点击重试派发或手动推进',
             'action': 'retry',
             'actionLabel': '重试派发',
+            'actionReason': '诊断显示当前阶段尚无有效派发，按建议重试派发',
             'retryable': True,
         }
     return {
@@ -3770,6 +3780,7 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
         'nextAction': '查看流程或手动推进',
         'action': 'none',
         'actionLabel': '',
+        'actionReason': '',
         'retryable': False,
     }
 

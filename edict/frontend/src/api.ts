@@ -810,6 +810,7 @@ export interface SchedulerStateData {
     nextAction?: string;
     action?: 'scan' | 'retry' | 'escalate' | 'rollback' | 'none' | string;
     actionLabel?: string;
+    actionReason?: string;
     retryable?: boolean;
   };
 }
