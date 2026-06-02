@@ -290,6 +290,8 @@ export default function TaskModal() {
   const todos = task.todos || [];
   const todoDone = todos.filter((x) => x.status === 'completed').length;
   const todoTotal = todos.length;
+  const isTerminalTask = ['Done', 'Cancelled'].includes(task.state);
+  const canMutateSchedule = !isTerminalTask;
   const canStop = !['Done', 'Blocked', 'Cancelled'].includes(task.state);
   const canResume = ['Blocked', 'Cancelled'].includes(task.state);
 
@@ -346,6 +348,10 @@ export default function TaskModal() {
 
   const doSchedAction = async (action: string, reasonOverride?: string, source: 'manual' | 'diagnosis' = 'manual') => {
     if (!['scan', 'retry', 'escalate', 'rollback'].includes(action)) return;
+    if (!canMutateSchedule && action !== 'scan') {
+      toast('终态任务不再派发；需要继续时请先恢复任务', 'err');
+      return;
+    }
     const actionLabel = SCHED_ACTION_LABELS[action] || '处理';
     const labelPrefix = source === 'diagnosis' ? '按诊断建议' : '';
     if (action === 'scan') {
@@ -431,7 +437,7 @@ export default function TaskModal() {
   const outbox = schedData?.outbox || activityData?.traceSummary?.outbox;
   const dispatchDiagnosis = schedData?.dispatchDiagnosis;
   const diagnosisAction = dispatchDiagnosis?.action;
-  const canRunDiagnosisAction = !!diagnosisAction && ['scan', 'retry', 'escalate', 'rollback'].includes(diagnosisAction);
+  const canRunDiagnosisAction = !!diagnosisAction && ['scan', 'retry', 'escalate', 'rollback'].includes(diagnosisAction) && (canMutateSchedule || diagnosisAction === 'scan');
   const stageLine = activeStage
     ? `${activeStage.dept} · ${activeStage.action}`
     : stateLabel(task);
@@ -547,9 +553,15 @@ export default function TaskModal() {
             )}
             <div className="sched-actions compact">
               <button className="sched-btn" disabled={!!schedActionFeedback?.pending} onClick={() => doSchedAction('scan')}><Search size={13} />立即扫描</button>
-              <button className="sched-btn" disabled={!!schedActionFeedback?.pending} onClick={() => doSchedAction('retry')}><RotateCcw size={13} />重试派发</button>
-              <button className="sched-btn warn" disabled={!!schedActionFeedback?.pending} onClick={() => doSchedAction('escalate')}><ArrowUpCircle size={13} />升级协调</button>
-              <button className="sched-btn danger" disabled={!!schedActionFeedback?.pending} onClick={() => doSchedAction('rollback')}><Undo2 size={13} />回滚</button>
+              {canMutateSchedule ? (
+                <>
+                  <button className="sched-btn" disabled={!!schedActionFeedback?.pending} onClick={() => doSchedAction('retry')}><RotateCcw size={13} />重试派发</button>
+                  <button className="sched-btn warn" disabled={!!schedActionFeedback?.pending} onClick={() => doSchedAction('escalate')}><ArrowUpCircle size={13} />升级协调</button>
+                  <button className="sched-btn danger" disabled={!!schedActionFeedback?.pending} onClick={() => doSchedAction('rollback')}><Undo2 size={13} />回滚</button>
+                </>
+              ) : (
+                <span className="sched-terminal-note">终态任务仅保留证据扫描</span>
+              )}
             </div>
           </div>
 
