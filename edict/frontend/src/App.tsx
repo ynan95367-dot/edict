@@ -1,7 +1,9 @@
 import { useEffect } from 'react';
 import {
+  Activity,
   AlertTriangle,
   Bot,
+  Clock,
   Command,
   Compass,
   FileText,
@@ -69,11 +71,22 @@ export default function App() {
   const activeEdicts = edicts.filter((t) => !isArchived(t));
   const sync = liveStatus?.syncStatus;
   const syncOk = sync?.ok;
+  const outboxSummary = runtimeOutbox?.summary;
+  const workerTone = outboxSummary?.tone === 'err' ? 'err' : outboxSummary?.tone === 'warn' ? 'warn' : 'ok';
+  const workerHeartbeat = runtimeOutbox?.worker?.heartbeatAgeText
+    ? `心跳 ${runtimeOutbox.worker.heartbeatAgeText}前`
+    : runtimeOutbox?.worker?.active
+      ? '心跳读取中'
+      : '未启动';
   const queueTone = runtimeOutbox?.failed
     ? 'err'
     : runtimeOutbox?.pending || runtimeOutbox?.running
       ? 'warn'
       : 'ok';
+  const oldestPendingTone = runtimeOutbox?.oldestPendingAgeSec && runtimeOutbox.oldestPendingAgeSec >= 600
+    ? 'warn'
+    : queueTone;
+  const trendTone = runtimeOutbox?.trend?.failed ? 'warn' : 'ok';
 
   // Tab badge counts
   const tabBadge = (key: string): string => {
@@ -100,10 +113,27 @@ export default function App() {
             <span className={`status-dot ${syncOk ? 'ok' : syncOk === false ? 'err' : 'warn'}`} />
             {syncOk ? '同步正常' : syncOk === false ? '服务器未启动' : '连接中'}
           </span>
+          <span
+            className={`chip ${workerTone}`}
+            title={outboxSummary?.detail || 'Worker health'}
+          >
+            <Activity size={12} />
+            Worker {outboxSummary?.label || '读取中'} · {workerHeartbeat}
+          </span>
           <span className="chip">{activeEdicts.length} 道旨意</span>
-          <span className={`chip ${queueTone}`}>
+          <span
+            className={`chip ${queueTone}`}
+            title={outboxSummary?.nextAction || 'pending/running/failed'}
+          >
             <AlertTriangle size={12} />
-            队列 {runtimeOutbox?.pending || 0}/{runtimeOutbox?.running || 0}/{runtimeOutbox?.failed || 0}
+            队列 P/R/F {runtimeOutbox?.pending || 0}/{runtimeOutbox?.running || 0}/{runtimeOutbox?.failed || 0}
+          </span>
+          <span className={`chip ${oldestPendingTone}`}>
+            <Clock size={12} />
+            最旧 pending {runtimeOutbox?.oldestPendingAgeText || '0秒'}
+          </span>
+          <span className={`chip ${trendTone}`}>
+            {runtimeOutbox?.trend?.label || '15分钟 入0 成0 败0'}
           </span>
           <button className="btn-refresh" onClick={() => loadAll()} aria-label="刷新看板">
             <RefreshCw size={14} />

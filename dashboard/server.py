@@ -88,6 +88,9 @@ _REFRESH_DEBOUNCE_SEC = 1.5
 _DISPATCH_WORKER_LOCK = threading.Lock()
 _DISPATCH_WORKER_ACTIVE = False
 _DISPATCH_WORKER_ID = f'dashboard-{os.getpid()}'
+_DISPATCH_WORKER_STARTED_AT = ''
+_DISPATCH_WORKER_HEARTBEAT_AT = ''
+_DISPATCH_WORKER_STOPPED_AT = ''
 _ANSI_RE = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
 
 
@@ -3577,6 +3580,116 @@ def _outbox_item_age(item, now_dt=None):
     return max(0, int((now_dt - created).total_seconds()))
 
 
+def _iso_age(value, now_dt=None):
+    dt = _parse_iso(value)
+    if not dt:
+        return None
+    now_dt = now_dt or datetime.datetime.now(datetime.timezone.utc)
+    return max(0, int((now_dt - dt).total_seconds()))
+
+
+def _outbox_item_time(item, *fields):
+    for field in fields:
+        dt = _parse_iso(item.get(field))
+        if dt:
+            return dt
+    return None
+
+
+def _runtime_outbox_trend(items, now_dt=None, window_sec=900):
+    now_dt = now_dt or datetime.datetime.now(datetime.timezone.utc)
+    since = now_dt - datetime.timedelta(seconds=window_sec)
+    window_text = f'{window_sec // 60}分钟' if window_sec and window_sec % 60 == 0 else _duration_text(window_sec)
+    enqueued = 0
+    completed = 0
+    failed = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        created = _outbox_item_time(item, 'createdAt')
+        if created and created >= since:
+            enqueued += 1
+        finished = _outbox_item_time(item, 'finishedAt', 'updatedAt')
+        status = item.get('status')
+        if finished and finished >= since and status == 'done':
+            completed += 1
+        if finished and finished >= since and status == 'failed':
+            failed += 1
+    return {
+        'windowSec': window_sec,
+        'windowText': window_text,
+        'enqueued': enqueued,
+        'completed': completed,
+        'failed': failed,
+        'label': f'{window_text} 入{enqueued} 成{completed} 败{failed}',
+    }
+
+
+def _runtime_outbox_summary(*, counts, worker, oldest_pending_age, oldest_running_age, trend):
+    pending = int(counts.get('pending') or 0)
+    running = int(counts.get('running') or 0)
+    failed = int(counts.get('failed') or 0)
+    worker_active = bool(worker.get('active'))
+    heartbeat_age = worker.get('heartbeatAgeSec')
+    active_total = pending + running
+    if failed:
+        return {
+            'tone': 'err',
+            'label': f'失败 {failed}',
+            'detail': f'有 {failed} 个失败派发项，pending={pending} running={running}。',
+            'nextAction': '先重试或归档失败项，再观察队列是否继续推进。',
+        }
+    if pending and not worker_active:
+        return {
+            'tone': 'warn',
+            'label': '等待 Worker',
+            'detail': f'队列有 {pending} 个 pending，但当前 worker 未运行。',
+            'nextAction': '刷新看板会唤起调度；若仍不动，检查 dashboard worker。',
+        }
+    if oldest_pending_age >= 600:
+        return {
+            'tone': 'warn',
+            'label': 'Pending 堆积',
+            'detail': f'最旧 pending 已等待 {_duration_text(oldest_pending_age)}，running={running}。',
+            'nextAction': '查看 outbox 详情，确认运行时或 Agent 是否接收任务。',
+        }
+    if oldest_running_age >= 600:
+        return {
+            'tone': 'warn',
+            'label': 'Running 过久',
+            'detail': f'最旧 running 已执行 {_duration_text(oldest_running_age)}。',
+            'nextAction': '检查对应 Agent session；必要时等待 stale 回收或重试。',
+        }
+    if worker_active:
+        hb = f'，心跳 {_duration_text(heartbeat_age)}前' if heartbeat_age is not None else ''
+        return {
+            'tone': 'ok' if active_total else 'idle',
+            'label': 'Worker 运行中',
+            'detail': f'worker 正在处理队列{hb}；pending={pending} running={running}。',
+            'nextAction': '继续观察任务进展。',
+        }
+    if active_total:
+        return {
+            'tone': 'warn',
+            'label': '队列待处理',
+            'detail': f'pending={pending} running={running}，worker 当前空闲。',
+            'nextAction': '刷新看板或等待下一轮调度唤起。',
+        }
+    if int((trend or {}).get('failed') or 0):
+        return {
+            'tone': 'warn',
+            'label': '近期失败',
+            'detail': trend.get('label', '近期出现过失败派发。'),
+            'nextAction': '检查失败记录是否已经归档或重试。',
+        }
+    return {
+        'tone': 'ok',
+        'label': '队列清空',
+        'detail': '没有 pending/running/failed 派发项。',
+        'nextAction': '无需处理。',
+    }
+
+
 def _public_outbox_item(item, task_map=None, now_dt=None):
     task_map = task_map or {}
     task = task_map.get(item.get('taskId', ''), {})
@@ -3622,12 +3735,29 @@ def get_runtime_outbox_health(limit=8):
         status = item.get('status', 'unknown')
         counts[status] = counts.get(status, 0) + 1
 
-    unfinished = [x for x in items if x.get('status') in {'pending', 'running'}]
+    pending_items = [x for x in items if x.get('status') == 'pending']
+    running_items = [x for x in items if x.get('status') == 'running']
+    unfinished = pending_items + running_items
     failed = [x for x in items if x.get('status') == 'failed']
     oldest_pending = min(
-        (_outbox_item_age(x, now_dt) for x in unfinished),
+        (_outbox_item_age(x, now_dt) for x in pending_items),
         default=0,
     )
+    oldest_running = min(
+        (_iso_age(x.get('claimedAt'), now_dt) or _outbox_item_age(x, now_dt) for x in running_items),
+        default=0,
+    )
+    heartbeat_age = _iso_age(_DISPATCH_WORKER_HEARTBEAT_AT, now_dt)
+    worker = {
+        'active': bool(_DISPATCH_WORKER_ACTIVE),
+        'workerId': _DISPATCH_WORKER_ID,
+        'startedAt': _DISPATCH_WORKER_STARTED_AT,
+        'heartbeatAt': _DISPATCH_WORKER_HEARTBEAT_AT,
+        'heartbeatAgeSec': heartbeat_age,
+        'heartbeatAgeText': _duration_text(heartbeat_age) if heartbeat_age is not None else '',
+        'stoppedAt': _DISPATCH_WORKER_STOPPED_AT,
+    }
+    trend = _runtime_outbox_trend(items, now_dt)
     task_map = {t.get('id', ''): t for t in load_tasks()}
     failed_sorted = sorted(failed, key=lambda x: x.get('updatedAt') or x.get('createdAt') or '', reverse=True)
     active_sorted = sorted(unfinished, key=lambda x: x.get('createdAt') or x.get('updatedAt') or '')
@@ -3636,10 +3766,7 @@ def get_runtime_outbox_health(limit=8):
     return {
         'ok': True,
         'checkedAt': now_iso(),
-        'worker': {
-            'active': bool(_DISPATCH_WORKER_ACTIVE),
-            'workerId': _DISPATCH_WORKER_ID,
-        },
+        'worker': worker,
         'counts': counts,
         'total': len(items),
         'pending': counts.get('pending', 0),
@@ -3649,6 +3776,16 @@ def get_runtime_outbox_health(limit=8):
         'done': counts.get('done', 0),
         'oldestPendingAgeSec': oldest_pending,
         'oldestPendingAgeText': _duration_text(oldest_pending),
+        'oldestRunningAgeSec': oldest_running,
+        'oldestRunningAgeText': _duration_text(oldest_running),
+        'trend': trend,
+        'summary': _runtime_outbox_summary(
+            counts=counts,
+            worker=worker,
+            oldest_pending_age=oldest_pending,
+            oldest_running_age=oldest_running,
+            trend=trend,
+        ),
         'latest': _public_outbox_item(latest, task_map, now_dt) if latest else {},
         'activeItems': [_public_outbox_item(x, task_map, now_dt) for x in active_sorted[:limit]],
         'deadLetters': [_public_outbox_item(x, task_map, now_dt) for x in dead_letters],
@@ -6173,18 +6310,22 @@ def _build_dispatch_payload(task_id, task, new_state, agent_id, trigger):
 
 
 def _kick_dispatch_worker():
-    global _DISPATCH_WORKER_ACTIVE
+    global _DISPATCH_WORKER_ACTIVE, _DISPATCH_WORKER_STARTED_AT, _DISPATCH_WORKER_HEARTBEAT_AT
     with _DISPATCH_WORKER_LOCK:
         if _DISPATCH_WORKER_ACTIVE:
             return
+        started_at = now_iso()
         _DISPATCH_WORKER_ACTIVE = True
+        _DISPATCH_WORKER_STARTED_AT = started_at
+        _DISPATCH_WORKER_HEARTBEAT_AT = started_at
     threading.Thread(target=_dispatch_outbox_worker, daemon=True).start()
 
 
 def _dispatch_outbox_worker():
-    global _DISPATCH_WORKER_ACTIVE
+    global _DISPATCH_WORKER_ACTIVE, _DISPATCH_WORKER_HEARTBEAT_AT, _DISPATCH_WORKER_STOPPED_AT
     try:
         while True:
+            _DISPATCH_WORKER_HEARTBEAT_AT = now_iso()
             items = _outbox_claim_pending(
                 worker_id=_DISPATCH_WORKER_ID,
                 kinds={'handoff', 'dispatch'},
@@ -6193,13 +6334,16 @@ def _dispatch_outbox_worker():
             if not items:
                 break
             for item in items:
+                _DISPATCH_WORKER_HEARTBEAT_AT = now_iso()
                 if item.get('kind') == 'handoff':
                     _process_handoff_outbox_item(item)
                 else:
                     _execute_dispatch_outbox_item(item)
+                _DISPATCH_WORKER_HEARTBEAT_AT = now_iso()
     finally:
         with _DISPATCH_WORKER_LOCK:
             _DISPATCH_WORKER_ACTIVE = False
+            _DISPATCH_WORKER_STOPPED_AT = now_iso()
         if _outbox_list(status='pending', limit=1):
             _kick_dispatch_worker()
 

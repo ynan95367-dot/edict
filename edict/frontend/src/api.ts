@@ -519,6 +519,11 @@ export interface RuntimeOutboxHealth {
   worker: {
     active: boolean;
     workerId: string;
+    startedAt?: string;
+    heartbeatAt?: string;
+    heartbeatAgeSec?: number | null;
+    heartbeatAgeText?: string;
+    stoppedAt?: string;
   };
   counts: Record<string, number>;
   total: number;
@@ -529,6 +534,22 @@ export interface RuntimeOutboxHealth {
   done: number;
   oldestPendingAgeSec: number;
   oldestPendingAgeText: string;
+  oldestRunningAgeSec?: number;
+  oldestRunningAgeText?: string;
+  trend?: {
+    windowSec?: number;
+    windowText?: string;
+    enqueued?: number;
+    completed?: number;
+    failed?: number;
+    label?: string;
+  };
+  summary?: {
+    tone?: 'ok' | 'warn' | 'err' | 'idle' | string;
+    label?: string;
+    detail?: string;
+    nextAction?: string;
+  };
   latest?: RuntimeOutboxItem;
   activeItems: RuntimeOutboxItem[];
   deadLetters: RuntimeOutboxItem[];

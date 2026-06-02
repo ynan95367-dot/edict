@@ -244,10 +244,55 @@ def test_runtime_outbox_health_exposes_dead_letters(tmp_path, monkeypatch):
     assert health['ok'] is True
     assert health['failed'] == 1
     assert health['pending'] == 1
+    assert health['summary']['tone'] == 'err'
+    assert health['summary']['label'] == '失败 1'
+    assert health['trend']['failed'] == 0
     assert health['deadLetters'][0]['taskId'] == 'JJC-FAIL-1'
     assert health['deadLetters'][0]['taskTitle'] == '派发失败任务'
     assert health['deadLetters'][0]['lastError'] == 'gateway offline'
     assert health['activeItems'][0]['taskId'] == 'JJC-PEND-1'
+
+
+def test_runtime_outbox_health_warns_about_stale_pending(tmp_path, monkeypatch):
+    import datetime as dt
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    data_dir.joinpath('tasks_source.json').write_text(json.dumps([
+        {'id': 'JJC-PEND-OLD', 'title': '长时间等待派发', 'state': 'Taizi'},
+    ], ensure_ascii=False), encoding='utf-8')
+    old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=900)).isoformat(timespec='seconds').replace('+00:00', 'Z')
+    outbox_path = data_dir / 'runtime_outbox.json'
+    outbox_path.write_text(json.dumps([{
+        'id': 'dispatch_old_pending',
+        'kind': 'dispatch',
+        'taskId': 'JJC-PEND-OLD',
+        'state': 'Taizi',
+        'agentId': 'taizi',
+        'status': 'pending',
+        'attempts': 0,
+        'maxAttempts': 1,
+        'createdAt': old,
+        'updatedAt': old,
+    }], ensure_ascii=False), encoding='utf-8')
+
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
+    monkeypatch.setattr(srv._runtime_outbox, 'OUTBOX_FILE', outbox_path)
+    monkeypatch.setattr(srv, '_DISPATCH_WORKER_ACTIVE', True)
+    monkeypatch.setattr(srv, '_DISPATCH_WORKER_HEARTBEAT_AT', old)
+
+    health = srv.get_runtime_outbox_health()
+
+    assert health['pending'] == 1
+    assert health['oldestPendingAgeSec'] >= 899
+    assert health['oldestRunningAgeSec'] == 0
+    assert health['worker']['active'] is True
+    assert health['worker']['heartbeatAgeSec'] >= 899
+    assert health['summary']['tone'] == 'warn'
+    assert health['summary']['label'] == 'Pending 堆积'
+    assert health['trend']['enqueued'] == 0
 
 
 def test_runtime_outbox_public_item_sanitizes_json_event_error():
