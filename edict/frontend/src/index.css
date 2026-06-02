@@ -471,6 +471,14 @@ textarea:focus-visible {
 .run-cell span { display: block; font-size: 10px; color: var(--muted); margin-bottom: 2px; }
 .run-cell b { display: block; font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-error { color: var(--danger); overflow-wrap: anywhere; }
+.run-diagnosis { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 9px; align-items: center; margin-top: 9px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: rgba(16,15,13,.64); }
+.run-diagnosis b { color: var(--text); font-size: 12px; white-space: nowrap; }
+.run-diagnosis span { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.run-diagnosis em { grid-column: 2; color: var(--muted2); font-size: 10px; font-style: normal; overflow-wrap: anywhere; }
+.run-diagnosis.ok { border-color: rgba(88,214,141,.28); }
+.run-diagnosis.warn { border-color: rgba(217,174,95,.34); }
+.run-diagnosis.err { border-color: rgba(239,111,100,.35); }
+.run-diagnosis.idle { border-color: rgba(119,132,150,.25); }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0; }
 .tone-ok { color: var(--ok) !important; }
 .tone-warn { color: var(--warn) !important; }
@@ -480,6 +488,8 @@ textarea:focus-visible {
 .sched-actions.compact { margin-top: 10px; }
 @media (max-width: 700px) {
   .run-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .run-diagnosis { grid-template-columns: 1fr; }
+  .run-diagnosis em { grid-column: 1; }
   .m-rows.concise { grid-template-columns: 1fr; }
   .cs-side { width: 100%; justify-content: flex-start; margin-left: 0; }
 }

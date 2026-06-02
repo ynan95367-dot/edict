@@ -385,6 +385,79 @@ def test_runtime_outbox_archive_all_failed_items(tmp_path, monkeypatch):
     assert [item['status'] for item in updated] == ['archived', 'archived', 'pending']
 
 
+def test_scheduler_state_exposes_opencode_session_diagnosis(tmp_path, monkeypatch):
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    data_dir.joinpath('tasks_source.json').write_text(json.dumps([
+        {
+            'id': 'JJC-DIAG-SESSION',
+            'title': 'OpenCode 会话失效',
+            'state': 'Taizi',
+            'org': '太子',
+            'updatedAt': '2026-06-02T09:00:00Z',
+            '_scheduler': {
+                'enabled': True,
+                'lastDispatchStatus': 'opencode-session-stale',
+                'lastDispatchError': 'Session not found',
+                'stallThresholdSec': 180,
+            },
+        },
+    ], ensure_ascii=False), encoding='utf-8')
+
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
+
+    result = srv.get_scheduler_state('JJC-DIAG-SESSION')
+
+    assert result['ok'] is True
+    diag = result['dispatchDiagnosis']
+    assert diag['tone'] == 'warn'
+    assert diag['label'] == 'OpenCode 会话失效'
+    assert diag['retryable'] is True
+    assert 'Session not found' in diag['detail']
+
+
+def test_scheduler_state_warns_when_success_dispatch_stalls(tmp_path, monkeypatch):
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    old = (
+        srv.datetime.datetime.now(srv.datetime.timezone.utc)
+        - srv.datetime.timedelta(seconds=600)
+    ).isoformat()
+    data_dir.joinpath('tasks_source.json').write_text(json.dumps([
+        {
+            'id': 'JJC-DIAG-STALL',
+            'title': '派发后未推进',
+            'state': 'Zhongshu',
+            'org': '中书省',
+            'updatedAt': old,
+            '_scheduler': {
+                'enabled': True,
+                'lastDispatchStatus': 'success',
+                'lastDispatchAt': old,
+                'lastProgressAt': old,
+                'stallThresholdSec': 180,
+            },
+        },
+    ], ensure_ascii=False), encoding='utf-8')
+
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
+
+    result = srv.get_scheduler_state('JJC-DIAG-STALL')
+
+    assert result['ok'] is True
+    diag = result['dispatchDiagnosis']
+    assert diag['tone'] == 'warn'
+    assert diag['label'] == '已派发但未推进'
+    assert diag['retryable'] is True
+    assert '立即扫描' in diag['nextAction']
+
+
 def test_runtime_outbox_requeues_orphaned_running_item(tmp_path, monkeypatch):
     import runtime_outbox
 

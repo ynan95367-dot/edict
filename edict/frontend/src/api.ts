@@ -803,6 +803,13 @@ export interface SchedulerStateData {
   outbox?: OutboxSummary;
   scheduler?: SchedulerInfo;
   stalledSec?: number;
+  dispatchDiagnosis?: {
+    tone?: 'ok' | 'warn' | 'err' | 'idle' | string;
+    label?: string;
+    detail?: string;
+    nextAction?: string;
+    retryable?: boolean;
+  };
 }
 
 export interface SkillContentResult {

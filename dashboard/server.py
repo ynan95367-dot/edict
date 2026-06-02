@@ -2668,6 +2668,13 @@ _AGENT_DEPTS = [
 ]
 
 
+def _agent_display_label(agent_id):
+    for item in _AGENT_DEPTS:
+        if item.get('id') == agent_id:
+            return item.get('label') or agent_id
+    return agent_id or ''
+
+
 def _agent_runtime():
     """Return the active agent runtime: openclaw (default) or opencode."""
     raw = (os.environ.get('EDICT_AGENT_RUNTIME') or os.environ.get('EDICT_RUNTIME') or 'openclaw').strip().lower()
@@ -3645,6 +3652,106 @@ def handle_runtime_outbox_archive(item_id='', archive_all_failed=False, task_id=
     return {'ok': True, 'message': f'已归档 {count} 条失败派发', 'count': count}
 
 
+def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent=''):
+    status = str(sched.get('lastDispatchStatus') or 'idle')
+    threshold = int(sched.get('stallThresholdSec') or 180)
+    error = _clean_runtime_error(sched.get('lastDispatchError', ''), limit=180)
+    pending = int((outbox_summary or {}).get('pending') or 0)
+    running = int((outbox_summary or {}).get('running') or 0)
+    failed = int((outbox_summary or {}).get('failed') or 0)
+    expected_label = _agent_display_label(expected_agent)
+    active_dispatch = bool(sched.get('activeDispatchId'))
+    terminal = task.get('state') in _TERMINAL_STATES
+
+    if terminal:
+        return {
+            'tone': 'ok',
+            'label': '流程已收口',
+            'detail': '任务已进入终态，不再自动派发。',
+            'nextAction': '查看执行回顾或输出文件',
+            'retryable': False,
+        }
+    if sched.get('enabled') is False:
+        return {
+            'tone': 'idle',
+            'label': '调度已禁用',
+            'detail': '自动派发被关闭，平台不会继续推动当前任务。',
+            'nextAction': '需要继续时先恢复调度或手动推进',
+            'retryable': False,
+        }
+    if failed:
+        return {
+            'tone': 'err',
+            'label': '存在失败派发',
+            'detail': error or '运行时 outbox 中还有失败记录。',
+            'nextAction': '点击重试派发；确认无效后归档失败项',
+            'retryable': True,
+        }
+    if status in {'gateway-offline', 'opencode-missing', 'openclaw-missing'}:
+        return {
+            'tone': 'err',
+            'label': '运行时不可用',
+            'detail': error or '派发所需运行时或 CLI 不可用。',
+            'nextAction': '先启动运行时或修复 CLI 配置，再重试派发',
+            'retryable': True,
+        }
+    if status in {'failed', 'timeout', 'error'}:
+        return {
+            'tone': 'err',
+            'label': '最近派发失败',
+            'detail': error or '最近一次自动派发没有成功收口。',
+            'nextAction': '点击重试派发，必要时升级协调',
+            'retryable': True,
+        }
+    if status == 'opencode-session-stale':
+        return {
+            'tone': 'warn',
+            'label': 'OpenCode 会话失效',
+            'detail': error or 'OpenCode session registry 曾失效，平台会尝试重启后重派。',
+            'nextAction': '等待自愈完成；若仍无进展，手动重试派发',
+            'retryable': True,
+        }
+    if active_dispatch or pending or running or status == 'queued':
+        return {
+            'tone': 'warn',
+            'label': '派发处理中',
+            'detail': f'队列 pending={pending} running={running}，等待运行时接收任务。',
+            'nextAction': '短暂等待；超过阈值后执行立即扫描或重试',
+            'retryable': False,
+        }
+    if status in {'success', 'progress'}:
+        if stalled_sec >= threshold:
+            return {
+                'tone': 'warn',
+                'label': '已派发但未推进',
+                'detail': f'最近派发已成功，但 {stalled_sec} 秒没有新进展。',
+                'nextAction': '先立即扫描；仍无证据再重试派发',
+                'retryable': True,
+            }
+        return {
+            'tone': 'ok',
+            'label': '派发正常',
+            'detail': '最近派发已被运行时接收，暂未发现阻塞。',
+            'nextAction': '等待 Agent 继续回写进展',
+            'retryable': False,
+        }
+    if expected_agent:
+        return {
+            'tone': 'idle',
+            'label': '等待派发',
+            'detail': f'当前阶段预期由 {expected_label} 处理，尚无有效派发结果。',
+            'nextAction': '点击重试派发或手动推进',
+            'retryable': True,
+        }
+    return {
+        'tone': 'idle',
+        'label': '无需派发',
+        'detail': '当前阶段没有匹配的自动派发 Agent。',
+        'nextAction': '查看流程或手动推进',
+        'retryable': False,
+    }
+
+
 def get_scheduler_state(task_id):
     tasks = load_tasks()
     task = next((t for t in tasks if t.get('id') == task_id), None)
@@ -3657,16 +3764,19 @@ def get_scheduler_state(task_id):
     stalled_sec = 0
     if last_progress:
         stalled_sec = max(0, int((now_dt - last_progress).total_seconds()))
+    expected_agent = _expected_agent_for_task(task)
+    outbox_summary = _outbox_task_summary(task_id)
     return {
         'ok': True,
         'taskId': task_id,
         'state': task.get('state', ''),
         'org': task.get('org', ''),
         'traceId': trace_id,
-        'expectedAgent': _expected_agent_for_task(task),
-        'outbox': _outbox_task_summary(task_id),
+        'expectedAgent': expected_agent,
+        'outbox': outbox_summary,
         'scheduler': sched,
         'stalledSec': stalled_sec,
+        'dispatchDiagnosis': _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent),
         'checkedAt': now_iso(),
     }
 

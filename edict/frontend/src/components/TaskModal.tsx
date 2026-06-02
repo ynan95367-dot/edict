@@ -376,6 +376,7 @@ export default function TaskModal() {
   const expectedAgent = agentLabel(schedData?.expectedAgent);
   const traceId = schedData?.traceId || activityData?.traceId || task.traceId || task.trace_id || '';
   const outbox = schedData?.outbox || activityData?.traceSummary?.outbox;
+  const dispatchDiagnosis = schedData?.dispatchDiagnosis;
   const stageLine = activeStage
     ? `${activeStage.dept} · ${activeStage.action}`
     : stateLabel(task);
@@ -458,6 +459,13 @@ export default function TaskModal() {
               <div className="run-cell"><span>Trace</span><b className="mono">{shortTrace(traceId)}</b></div>
               <div className="run-cell"><span>队列</span><b className={outbox?.failed ? 'tone-err' : outbox?.pending || outbox?.running ? 'tone-warn' : 'tone-ok'}>{outboxLabel(outbox)}</b></div>
             </div>
+            {dispatchDiagnosis && (
+              <div className={`run-diagnosis ${dispatchDiagnosis.tone || 'idle'}`}>
+                <b>{dispatchDiagnosis.label || '派发诊断'}</b>
+                <span>{dispatchDiagnosis.detail || '等待调度信息'}</span>
+                {dispatchDiagnosis.nextAction && <em>{dispatchDiagnosis.nextAction}</em>}
+              </div>
+            )}
             {sched && (
               <div className="run-line">
                 {sched.lastProgressAt && <span>最近进展 {formatDashboardDateTime(sched.lastProgressAt)}</span>}
