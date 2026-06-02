@@ -422,6 +422,59 @@ def test_scheduler_state_exposes_opencode_session_diagnosis(tmp_path, monkeypatc
     assert 'Session not found' in diag['detail']
 
 
+def test_scheduler_state_exposes_runtime_session_binding(tmp_path, monkeypatch):
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    data_dir.joinpath('tasks_source.json').write_text(json.dumps([
+        {
+            'id': 'JJC-DIAG-BIND',
+            'title': '绑定 OpenCode session',
+            'state': 'Taizi',
+            'org': '太子',
+            'traceId': 'trc_bind_123456',
+            'updatedAt': '2026-06-02T09:00:00Z',
+            '_scheduler': {
+                'enabled': True,
+                'lastDispatchStatus': 'success',
+                'lastDispatchAgent': 'taizi',
+                'lastDispatchState': 'Taizi',
+                'lastDispatchTrigger': 'imperial-edict',
+                'lastDispatchSession': 'ses_bind_abcdef',
+                'lastDispatchTraceId': 'trc_bind_123456',
+                'lastDispatchRuntime': 'opencode',
+                'lastDispatchSessionBoundAt': '2026-06-02T09:00:05Z',
+                'lastDispatchSessionDispatchId': 'dispatch_bind',
+                'runtimeSessions': [{
+                    'sessionId': 'ses_bind_abcdef',
+                    'traceId': 'trc_bind_123456',
+                    'agentId': 'taizi',
+                    'runtime': 'opencode',
+                    'dispatchId': 'dispatch_bind',
+                    'trigger': 'imperial-edict',
+                    'state': 'Taizi',
+                    'boundAt': '2026-06-02T09:00:05Z',
+                }],
+            },
+        },
+    ], ensure_ascii=False), encoding='utf-8')
+
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
+
+    result = srv.get_scheduler_state('JJC-DIAG-BIND')
+
+    assert result['ok'] is True
+    binding = result['runtimeSession']
+    assert binding['status'] == 'bound'
+    assert binding['bound'] is True
+    assert binding['sessionId'] == 'ses_bind_abcdef'
+    assert binding['traceId'] == 'trc_bind_123456'
+    assert binding['runtime'] == 'opencode'
+    assert binding['dispatchId'] == 'dispatch_bind'
+
+
 def test_scheduler_state_warns_when_success_dispatch_stalls(tmp_path, monkeypatch):
     import server as srv
 

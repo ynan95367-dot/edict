@@ -146,6 +146,21 @@ function outboxLabel(outbox?: { pending?: number; running?: number; failed?: num
   return parts.join(' · ') || '空';
 }
 
+function runtimeSessionTone(status?: string): 'ok' | 'warn' | 'err' | 'idle' {
+  if (status === 'bound') return 'ok';
+  if (status === 'trace-mismatch') return 'err';
+  if (status === 'unbound') return 'idle';
+  if (status) return 'warn';
+  return 'idle';
+}
+
+function runtimeSessionLabel(status?: string): string {
+  if (status === 'bound') return '已绑定';
+  if (status === 'trace-mismatch') return 'Trace 不一致';
+  if (status === 'unbound') return '未绑定';
+  return status || '未绑定';
+}
+
 export default function TaskModal() {
   const modalTaskId = useStore((s) => s.modalTaskId);
   const setModalTaskId = useStore((s) => s.setModalTaskId);
@@ -436,6 +451,9 @@ export default function TaskModal() {
   const traceId = schedData?.traceId || activityData?.traceId || task.traceId || task.trace_id || '';
   const outbox = schedData?.outbox || activityData?.traceSummary?.outbox;
   const dispatchDiagnosis = schedData?.dispatchDiagnosis;
+  const runtimeSession = schedData?.runtimeSession;
+  const sessionTone = runtimeSessionTone(runtimeSession?.status);
+  const sessionLabel = runtimeSessionLabel(runtimeSession?.status);
   const diagnosisAction = dispatchDiagnosis?.action;
   const canRunDiagnosisAction = !!diagnosisAction && ['scan', 'retry', 'escalate', 'rollback'].includes(diagnosisAction) && (canMutateSchedule || diagnosisAction === 'scan');
   const doneStages = stages.filter((s) => s.status === 'done').length;
@@ -557,6 +575,8 @@ export default function TaskModal() {
                 <div className="run-cell"><span>未推进</span><b>{fmtStalled(stalledSec)}</b></div>
                 <div className="run-cell"><span>目标</span><b>{expectedAgent || lastDispatchAgent || task.org || '—'}</b></div>
                 <div className="run-cell"><span>Trace</span><b className="mono">{shortTrace(traceId)}</b></div>
+                <div className="run-cell"><span>Session</span><b className={`mono tone-${sessionTone}`}>{runtimeSession?.sessionId ? shortTrace(runtimeSession.sessionId) : '未绑定'}</b></div>
+                <div className="run-cell"><span>绑定</span><b className={`tone-${sessionTone}`}>{sessionLabel}</b></div>
                 <div className="run-cell"><span>队列</span><b className={outbox?.failed ? 'tone-err' : outbox?.pending || outbox?.running ? 'tone-warn' : 'tone-ok'}>{outboxLabel(outbox)}</b></div>
               </div>
             </div>
@@ -564,6 +584,7 @@ export default function TaskModal() {
               <div className="run-line">
                 {sched.lastProgressAt && <span>最近进展 {formatDashboardDateTime(sched.lastProgressAt)}</span>}
                 {sched.lastDispatchAt && <span>最近派发 {formatDashboardDateTime(sched.lastDispatchAt)}</span>}
+                {runtimeSession?.boundAt && <span>Session 绑定 {formatDashboardDateTime(runtimeSession.boundAt)}</span>}
                 {sched.lastDispatchError && <span className="run-error">派发错误：{sched.lastDispatchError}</span>}
                 <span>重试 {sched.retryCount || 0}</span>
                 <span>升级 {!sched.escalationLevel ? '无' : sched.escalationLevel === 1 ? '门下省' : '尚书省'}</span>

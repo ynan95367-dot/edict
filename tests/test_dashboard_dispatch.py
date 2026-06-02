@@ -198,6 +198,7 @@ def test_dispatch_skips_duplicate_unfinished_outbox(monkeypatch, tmp_path):
 
 def test_dispatch_uses_opencode_run_attach(monkeypatch, tmp_path):
     """OpenCode mode should dispatch through `opencode run --attach --dir --agent`."""
+    import event_log
     import server as srv
 
     data_dir = tmp_path / 'data'
@@ -219,6 +220,7 @@ def test_dispatch_uses_opencode_run_attach(monkeypatch, tmp_path):
     monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
     monkeypatch.setattr(srv, '_check_gateway_alive', lambda: True)
     monkeypatch.setattr(srv, '_resolve_opencode_bin', lambda: '/usr/local/bin/opencode')
+    monkeypatch.setattr(srv, '_opencode_session_error', lambda session_id: '')
     monkeypatch.setattr(
         srv,
         'save_tasks',
@@ -238,7 +240,7 @@ def test_dispatch_uses_opencode_run_attach(monkeypatch, tmp_path):
 
     class Completed:
         returncode = 0
-        stdout = ''
+        stdout = '{"sessionID":"ses_ok"}\n'
         stderr = ''
 
     captured = {'cmds': [], 'envs': []}
@@ -263,7 +265,17 @@ def test_dispatch_uses_opencode_run_attach(monkeypatch, tmp_path):
     assert captured['envs'][0]['EDICT_AGENT_ID'] == 'taizi'
 
     updated = json.loads(tasks_path.read_text(encoding='utf-8'))[0]
-    assert updated['_scheduler']['lastDispatchStatus'] == 'success'
+    sched = updated['_scheduler']
+    assert sched['lastDispatchStatus'] == 'success'
+    assert sched['lastDispatchSession'] == 'ses_ok'
+    assert sched['lastDispatchTraceId'] == updated['traceId']
+    assert sched['runtimeSessions'][-1]['sessionId'] == 'ses_ok'
+    assert sched['runtimeSessions'][-1]['traceId'] == updated['traceId']
+    events = event_log.list_events(task_id=task_id)
+    bound = next(e for e in events if e['kind'] == 'dispatch_session_bound')
+    assert bound['traceId'] == updated['traceId']
+    assert bound['sessionId'] == 'ses_ok'
+    assert bound['payload']['dispatchId'] == sched['lastDispatchSessionDispatchId']
 
 
 def test_opencode_session_not_found_restarts_and_retries(monkeypatch, tmp_path):
@@ -463,6 +475,7 @@ def test_opencode_session_preflight_restarts_before_dispatch(monkeypatch, tmp_pa
 
 def test_stale_dispatch_result_does_not_override_newer_progress(monkeypatch, tmp_path):
     """A late dispatch result must not overwrite progress from a newer task state."""
+    import event_log
     import server as srv
 
     data_dir = tmp_path / 'data'
@@ -520,6 +533,8 @@ def test_stale_dispatch_result_does_not_override_newer_progress(monkeypatch, tmp
     assert updated['state'] == 'Zhongshu'
     assert sched['lastDispatchStatus'] == 'progress'
     assert sched.get('lastDispatchSession') != 'ses_ok'
+    assert not sched.get('runtimeSessions')
+    assert not any(e['kind'] == 'dispatch_session_bound' for e in event_log.list_events(task_id=task_id))
 
 
 def test_opencode_agents_are_idle_without_recent_session(monkeypatch):

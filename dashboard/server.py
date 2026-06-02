@@ -124,6 +124,55 @@ def _ensure_trace_id(task):
     task['traceId'] = trace_id
     return trace_id
 
+
+def _scheduler_add_runtime_session(sched, *, session_id, trace_id, agent_id, runtime, dispatch_id, trigger, state, bound_at):
+    """Keep a bounded runtime-session binding history on the task scheduler."""
+    if not session_id:
+        return
+    entry = {
+        'sessionId': session_id,
+        'traceId': trace_id,
+        'agentId': agent_id,
+        'runtime': runtime,
+        'dispatchId': dispatch_id,
+        'trigger': trigger,
+        'state': state,
+        'boundAt': bound_at,
+    }
+    sessions = sched.get('runtimeSessions')
+    if not isinstance(sessions, list):
+        sessions = []
+    sessions = [s for s in sessions if isinstance(s, dict) and s.get('sessionId') != session_id]
+    sessions.append(entry)
+    sched['runtimeSessions'] = sessions[-12:]
+    sched['lastDispatchSession'] = session_id
+    sched['lastDispatchTraceId'] = trace_id
+    sched['lastDispatchRuntime'] = runtime
+    sched['lastDispatchSessionBoundAt'] = bound_at
+    sched['lastDispatchSessionDispatchId'] = dispatch_id
+
+
+def _runtime_session_summary(sched, trace_id=''):
+    sessions = [s for s in (sched.get('runtimeSessions') or []) if isinstance(s, dict)]
+    latest = sessions[-1] if sessions else {}
+    session_id = sched.get('lastDispatchSession') or latest.get('sessionId') or ''
+    bound_trace = sched.get('lastDispatchTraceId') or latest.get('traceId') or ''
+    status = 'unbound'
+    if session_id and bound_trace:
+        status = 'bound' if (not trace_id or bound_trace == trace_id) else 'trace-mismatch'
+    return {
+        'status': status,
+        'bound': status == 'bound',
+        'sessionId': session_id,
+        'traceId': bound_trace or trace_id,
+        'agentId': sched.get('lastDispatchAgent') or latest.get('agentId') or '',
+        'runtime': sched.get('lastDispatchRuntime') or latest.get('runtime') or '',
+        'dispatchId': sched.get('lastDispatchSessionDispatchId') or latest.get('dispatchId') or '',
+        'trigger': sched.get('lastDispatchTrigger') or latest.get('trigger') or '',
+        'state': sched.get('lastDispatchState') or latest.get('state') or '',
+        'boundAt': sched.get('lastDispatchSessionBoundAt') or latest.get('boundAt') or '',
+    }
+
 # 静态资源 MIME 类型
 _MIME_TYPES = {
     '.html': 'text/html; charset=utf-8',
@@ -3808,6 +3857,7 @@ def get_scheduler_state(task_id):
         'expectedAgent': expected_agent,
         'outbox': outbox_summary,
         'scheduler': sched,
+        'runtimeSession': _runtime_session_summary(sched, trace_id),
         'stalledSec': stalled_sec,
         'dispatchDiagnosis': _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent),
         'checkedAt': now_iso(),
@@ -4859,6 +4909,9 @@ def _task_opencode_session_ids(task, ledger_events):
     sched = (task or {}).get('_scheduler') or {}
     add(sched.get('lastDispatchSession'))
     add(sched.get('activeDispatchSession'))
+    for binding in sched.get('runtimeSessions') or []:
+        if isinstance(binding, dict):
+            add(binding.get('sessionId'))
     for event in ledger_events or []:
         if not isinstance(event, dict):
             continue
@@ -6221,8 +6274,10 @@ def _execute_dispatch_outbox_item(item):
                 stale['state'] = t.get('state', '')
                 stale['activeDispatchId'] = s.get('activeDispatchId', '')
                 return
+            t['traceId'] = trace_id
+            dispatch_at = now_iso()
             update = {
-                'lastDispatchAt': now_iso(),
+                'lastDispatchAt': dispatch_at,
                 'lastDispatchStatus': status,
                 'lastDispatchAgent': agent_id,
                 'lastDispatchState': new_state,
@@ -6230,7 +6285,17 @@ def _execute_dispatch_outbox_item(item):
                 'lastDispatchError': error,
             }
             if session_id:
-                update['lastDispatchSession'] = session_id
+                _scheduler_add_runtime_session(
+                    s,
+                    session_id=session_id,
+                    trace_id=trace_id,
+                    agent_id=agent_id,
+                    runtime=runtime,
+                    dispatch_id=dispatch_id,
+                    trigger=trigger,
+                    state=new_state,
+                    bound_at=dispatch_at,
+                )
             s.update(update)
             s.pop('activeDispatchId', None)
             s.pop('activeDispatchState', None)
@@ -6419,7 +6484,19 @@ def _execute_dispatch_outbox_item(item):
                     session_id=session_id,
                     flow_remark=f'派发成功：{agent_id}（{trigger}）',
                 ):
-                    _outbox_mark_done(dispatch_id, {'status': 'success', 'sessionId': session_id})
+                    _outbox_mark_done(dispatch_id, {'status': 'success', 'sessionId': session_id, 'traceId': trace_id})
+                    if session_id:
+                        _append_runtime_event('dispatch_session_bound', task_id, agent_id, {
+                            'from': runtime_label,
+                            'to': agent_id,
+                            'trigger': trigger,
+                            'status': 'bound',
+                            'sessionId': session_id,
+                            'traceId': trace_id,
+                            'dispatchId': dispatch_id,
+                            'state': new_state,
+                            'remark': f'{runtime_label} session 已绑定 trace: {session_id}',
+                        }, trace_id=trace_id, session_id=session_id)
                 _append_runtime_event('dispatch_succeeded', task_id, agent_id, {
                     'from': runtime_label,
                     'to': agent_id,
@@ -6554,7 +6631,7 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
             'activeDispatchId': dispatch_id,
             'activeDispatchState': new_state,
             'activeDispatchStartedAt': dispatch_started_at,
-        }))
+        }) or t.__setitem__('traceId', trace_id))
         _append_runtime_event('dispatch_deduped', task_id, agent_id, {
             'from': 'scheduler',
             'to': agent_id,
@@ -6569,6 +6646,7 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
         return
 
     updated = _update_task_scheduler(task_id, lambda t, s: (
+        t.__setitem__('traceId', trace_id),
         s.update({
             'lastDispatchAt': dispatch_started_at,
             'lastDispatchStatus': 'queued',

@@ -792,7 +792,24 @@ export interface SchedulerInfo {
   lastDispatchAt?: string;
   lastDispatchAgent?: string;
   lastDispatchError?: string;
+  lastDispatchSession?: string;
+  lastDispatchTraceId?: string;
+  lastDispatchRuntime?: string;
+  lastDispatchSessionBoundAt?: string;
   autoRollback?: boolean;
+}
+
+export interface RuntimeSessionBinding {
+  status?: 'bound' | 'unbound' | 'trace-mismatch' | string;
+  bound?: boolean;
+  sessionId?: string;
+  traceId?: string;
+  agentId?: string;
+  runtime?: string;
+  dispatchId?: string;
+  trigger?: string;
+  state?: string;
+  boundAt?: string;
 }
 
 export interface SchedulerStateData {
@@ -802,6 +819,7 @@ export interface SchedulerStateData {
   expectedAgent?: string;
   outbox?: OutboxSummary;
   scheduler?: SchedulerInfo;
+  runtimeSession?: RuntimeSessionBinding;
   stalledSec?: number;
   dispatchDiagnosis?: {
     tone?: 'ok' | 'warn' | 'err' | 'idle' | string;
