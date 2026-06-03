@@ -3524,6 +3524,20 @@ def _recent_model_record_status(model_id, health=None):
     return worst
 
 
+def _cached_registry_model_ids():
+    try:
+        cached = atomic_json_read(_model_registry_file(), {})
+    except Exception:
+        return set()
+    if not isinstance(cached, dict) or not isinstance(cached.get('models'), list):
+        return set()
+    return {
+        str(item.get('id') or '').strip()
+        for item in cached.get('models', [])
+        if isinstance(item, dict) and item.get('id')
+    }
+
+
 def _same_tier_fallback_model(agent_id, failed_model, failure_status='failed'):
     cfg = _agent_config()
     known = _known_model_entries(cfg)
@@ -3532,25 +3546,45 @@ def _same_tier_fallback_model(agent_id, failed_model, failure_status='failed'):
     failed_provider = _model_provider(failed_model, known)
     failed_family = _model_auth_family(failed_model, failed_provider)
     health = _read_model_health()
+    probe_latency = _model_probe_latency_snapshot()
+    live_ids = _cached_registry_model_ids()
     candidates = []
     for entry in known:
         model_id = entry.get('id') if isinstance(entry, dict) else ''
         if not model_id or model_id == failed_model:
             continue
-        if _model_tier(model_id) != failed_tier:
+        if live_ids and model_id not in live_ids:
             continue
         recent_status = _recent_model_record_status(model_id, health)
         if recent_status in {'timeout', 'failed'}:
             continue
+        probe_signal = probe_latency.get(model_id) or {}
+        probe_status = probe_signal.get('status') or ''
+        if probe_status in {'timeout', 'failed', 'offline', 'degraded'}:
+            continue
         provider = _model_provider(model_id, known)
+        tier = _model_tier(model_id)
+        observed_penalty = 0 if probe_status == 'ok' else 2
+        tier_penalty = 0 if tier == failed_tier else 1
         family_penalty = 0 if _model_auth_family(model_id, provider) == failed_family else 1
         provider_penalty = 0 if provider == failed_provider else 1
         health_penalty = 0 if recent_status in {'', 'ok', 'unknown'} else 1
-        candidates.append((health_penalty, family_penalty, provider_penalty, _model_label(model_id, known), model_id))
+        latency = probe_signal.get('latencyMs')
+        latency_penalty = int(latency) if isinstance(latency, (int, float)) else 999999
+        candidates.append((
+            observed_penalty,
+            tier_penalty,
+            health_penalty,
+            latency_penalty,
+            family_penalty,
+            provider_penalty,
+            _model_label(model_id, known),
+            model_id,
+        ))
     if not candidates:
         return ''
     candidates.sort()
-    return candidates[0][4]
+    return candidates[0][-1]
 
 
 def _append_model_change_log(entry):
@@ -8571,6 +8605,33 @@ def _execute_dispatch_outbox_item(item):
         return
     task_trace_id = _ensure_trace_id(task)
     trace_id = trace_id or task_trace_id or task_id
+    if new_state and task.get('state') != new_state:
+        _outbox_mark_done(dispatch_id, {'stale': True, 'currentState': task.get('state', ''), 'expectedState': new_state})
+        _append_runtime_event('dispatch_stale_skipped', task_id, agent_id, {
+            'from': _runtime_label(),
+            'to': agent_id,
+            'trigger': trigger,
+            'status': 'stale-skipped',
+            'dispatchId': dispatch_id,
+            'expectedState': new_state,
+            'currentState': task.get('state', ''),
+            'remark': '任务状态已变化，过期派发已跳过',
+        }, confidence='high', trace_id=trace_id)
+        return
+    expected_agent = _expected_agent_for_task(task, new_state)
+    if expected_agent and expected_agent != agent_id:
+        _outbox_mark_done(dispatch_id, {'stale': True, 'expectedAgent': expected_agent, 'agentId': agent_id})
+        _append_runtime_event('dispatch_stale_skipped', task_id, agent_id, {
+            'from': _runtime_label(),
+            'to': agent_id,
+            'trigger': trigger,
+            'status': 'stale-skipped',
+            'dispatchId': dispatch_id,
+            'expectedAgent': expected_agent,
+            'agentId': agent_id,
+            'remark': '派发目标已变化，过期派发已跳过',
+        }, confidence='high', trace_id=trace_id)
+        return
     title = payload.get('title') or task.get('title', '(无标题)')
     dispatch_payload = _build_dispatch_payload(task_id, task, new_state, agent_id, trigger)
     msg = payload.get('message') or dispatch_payload['message']

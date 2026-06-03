@@ -296,6 +296,7 @@ export default function ModelConfig() {
   const probeEnabled = Boolean(probe?.config?.enabled);
   const probeShouldStop = probeRunning || probeEnabled;
   const probeQueueCount = probe?.queue?.length || 0;
+  const isOpenCodeRuntime = (agentConfig?.runtime || '').toLowerCase() === 'opencode';
 
   if (!agentConfig?.agents) {
     return <div className="empty" style={{ gridColumn: '1/-1' }}>⚠️ 请先启动本地服务器</div>;
@@ -690,15 +691,15 @@ export default function ModelConfig() {
 
       {/* Dispatch Channel 配置 */}
       <div style={{ marginTop: 24, marginBottom: 8 }}>
-        <div className="sec-title">派发渠道</div>
+        <div className="sec-title">{isOpenCodeRuntime ? 'OpenClaw 派发渠道' : '派发渠道'}</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0' }}>
           <select className="msel" value={channelSel} onChange={(e) => setChannelSel(e.target.value)}
-            style={{ maxWidth: 220 }}>
+            style={{ maxWidth: 220 }} disabled={isOpenCodeRuntime}>
             {CHANNELS.map((ch) => (
               <option key={ch.id} value={ch.id}>{ch.label}</option>
             ))}
           </select>
-          <button className="btn btn-p" disabled={channelSel === (agentConfig?.dispatchChannel || 'feishu')}
+          <button className="btn btn-p" disabled={isOpenCodeRuntime || channelSel === (agentConfig?.dispatchChannel || 'feishu')}
             onClick={async () => {
               try {
                 const r = await api.setDispatchChannel(channelSel);
@@ -709,7 +710,11 @@ export default function ModelConfig() {
             }}>应用</button>
           {channelStatus && <span style={{ fontSize: 12, color: channelStatus.startsWith('✅') ? 'var(--success)' : 'var(--danger)' }}>{channelStatus}</span>}
         </div>
-        <div style={{ fontSize: 11, color: 'var(--muted)' }}>自动派发时使用的通知渠道；OpenClaw 模式需在 openclaw.json 中配置对应 channel。</div>
+        <div style={{ fontSize: 11, color: 'var(--muted)' }}>
+          {isOpenCodeRuntime
+            ? '当前为 OpenCode 模式：任务派发通过 Outbox + OpenCode CLI 执行，这里的渠道仅用于 OpenClaw deliver，不影响 OpenCode 派发成功率。'
+            : '自动派发时使用的通知渠道；OpenClaw 模式需在 openclaw.json 中配置对应 channel。'}
+        </div>
       </div>
 
       {/* Change Log */}

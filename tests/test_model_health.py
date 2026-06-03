@@ -311,6 +311,60 @@ def test_run_model_probes_now_starts_background_batch(monkeypatch, tmp_path):
     assert calls == [['opencode/big-pickle']]
 
 
+def test_model_failover_prefers_observed_ok_model_over_unsupported_same_tier(monkeypatch, tmp_path):
+    """Fallback should not choose a recently failed unsupported model when a probed model is healthy."""
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    failed_model = 'opencode/big-pickle'
+    unsupported_model = 'github-copilot/claude-sonnet-4'
+    healthy_model = 'opencode/deepseek-v4-flash-free'
+    (data_dir / 'agent_config.json').write_text(
+        json.dumps(
+            {
+                'runtime': 'opencode',
+                'defaultModel': failed_model,
+                'knownModels': [
+                    {'id': failed_model, 'label': 'Big Pickle', 'provider': 'OpenCode Zen'},
+                    {'id': unsupported_model, 'label': 'Claude Sonnet 4', 'provider': 'GitHub Copilot'},
+                    {'id': healthy_model, 'label': 'DeepSeek Free', 'provider': 'OpenCode Zen'},
+                ],
+                'agents': [{'id': 'zhongshu', 'label': '中书省', 'role': '中书令', 'emoji': '📜', 'model': failed_model}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding='utf-8',
+    )
+    (data_dir / 'model_registry.json').write_text(
+        json.dumps(
+            {
+                'version': 2,
+                'models': [{'id': failed_model}, {'id': unsupported_model}, {'id': healthy_model}],
+                'generatedAt': '2026-06-03T00:00:00Z',
+            },
+            ensure_ascii=False,
+        ),
+        encoding='utf-8',
+    )
+
+    monkeypatch.setenv('EDICT_RUNTIME', 'opencode')
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_append_runtime_event', lambda *args, **kwargs: None)
+
+    srv._record_model_health(
+        'zhongshu',
+        unsupported_model,
+        'failed',
+        error='The requested model is not supported.',
+    )
+    srv._record_model_probe(healthy_model, 'ok', latency_ms=2800, source='test-probe')
+
+    fallback = srv._same_tier_fallback_model('zhongshu', failed_model, 'timeout')
+
+    assert fallback == healthy_model
+
+
 def test_model_registry_hides_agent_config_only_legacy_models(monkeypatch, tmp_path):
     """Legacy OpenClaw/Copilot leftovers should not appear when OpenCode has a live catalog."""
     import server as srv
