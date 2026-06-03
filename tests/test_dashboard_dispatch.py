@@ -145,6 +145,122 @@ def test_dispatch_records_pending_outbox_before_worker(monkeypatch, tmp_path):
     assert outbox[0]['agentId'] == 'taizi'
 
 
+def test_policy_gate_blocks_dispatch_before_outbox(monkeypatch, tmp_path):
+    """A held RunSpec must not be enqueued even if a retry/scan asks to dispatch."""
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    task_id = 'JJC-POLICY-HOLD'
+    task = {
+        'id': task_id,
+        'title': '需要 shell 审批',
+        'state': 'Menxia',
+        'org': '门下省',
+        'updatedAt': '2026-06-03T10:00:00Z',
+        'flow_log': [],
+        'runSpec': {
+            'policyGate': {
+                'decision': 'hold_for_policy',
+                'status': 'waiting_policy_approval',
+                'reason': 'shell.execute 需要人工确认',
+                'requiresApproval': True,
+            },
+            'toolPolicy': {
+                'permissions': ['shell.execute'],
+                'requiresApproval': True,
+            },
+        },
+    }
+    tasks_path = data_dir / 'tasks_source.json'
+    tasks_path.write_text(json.dumps([task], ensure_ascii=False), encoding='utf-8')
+
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
+    monkeypatch.setattr(srv, '_kick_dispatch_worker', lambda: (_ for _ in ()).throw(AssertionError('worker should not start')))
+
+    srv.dispatch_for_state(task_id, task, 'Menxia', trigger='taizi-retry')
+
+    updated = json.loads(tasks_path.read_text(encoding='utf-8'))[0]
+    sched = updated['_scheduler']
+    assert sched['lastDispatchStatus'] == 'policy-held'
+    assert sched['lastDispatchTrigger'] == 'taizi-retry'
+    assert sched['policyGateDecision'] == 'hold_for_policy'
+    assert 'shell.execute' in sched['lastDispatchError']
+    assert not (data_dir / 'runtime_outbox.json').exists()
+    assert any('权限闸门拦截派发' in item['remark'] for item in updated['flow_log'])
+
+
+def test_policy_gate_blocks_legacy_outbox_worker(monkeypatch, tmp_path):
+    """Worker execution must re-check policy so old queued items cannot bypass approval."""
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    task_id = 'JJC-POLICY-WORKER'
+    dispatch_id = 'dispatch_policy_worker'
+    outbox_path = data_dir / 'runtime_outbox.json'
+    task = {
+        'id': task_id,
+        'title': '旧队列项需要拦截',
+        'state': 'Menxia',
+        'org': '门下省',
+        'traceId': 'trc_policy_worker',
+        'updatedAt': '2026-06-03T10:00:00Z',
+        'flow_log': [],
+        '_scheduler': {
+            'lastDispatchAgent': 'menxia',
+            'lastDispatchState': 'Menxia',
+            'lastDispatchStatus': 'running',
+            'activeDispatchId': dispatch_id,
+            'activeDispatchState': 'Menxia',
+            'activeDispatchStartedAt': '2026-06-03T10:00:01Z',
+        },
+        'runSpec': {
+            'policyGate': {
+                'decision': 'hold_for_policy',
+                'status': 'waiting_policy_approval',
+                'reason': 'browser.control 需要确认',
+                'requiresApproval': True,
+            },
+        },
+    }
+    tasks_path = data_dir / 'tasks_source.json'
+    tasks_path.write_text(json.dumps([task], ensure_ascii=False), encoding='utf-8')
+    outbox_path.write_text(json.dumps([
+        {
+            'id': dispatch_id,
+            'kind': 'dispatch',
+            'taskId': task_id,
+            'state': 'Menxia',
+            'agentId': 'menxia',
+            'trigger': 'startup-recovery',
+            'status': 'running',
+            'attempts': 1,
+            'createdAt': '2026-06-03T10:00:01Z',
+            'updatedAt': '2026-06-03T10:00:01Z',
+            'payload': {'traceId': 'trc_policy_worker'},
+        },
+    ], ensure_ascii=False), encoding='utf-8')
+
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
+    monkeypatch.setattr(srv._runtime_outbox, 'OUTBOX_FILE', outbox_path)
+    monkeypatch.setattr(srv, '_check_gateway_alive', lambda: (_ for _ in ()).throw(AssertionError('gateway should not be probed')))
+
+    srv._execute_dispatch_outbox_item(json.loads(outbox_path.read_text(encoding='utf-8'))[0])
+
+    updated = json.loads(tasks_path.read_text(encoding='utf-8'))[0]
+    sched = updated['_scheduler']
+    outbox = json.loads(outbox_path.read_text(encoding='utf-8'))[0]
+    assert sched['lastDispatchStatus'] == 'policy-held'
+    assert sched['lastDispatchError'] == 'browser.control 需要确认'
+    assert 'activeDispatchId' not in sched
+    assert outbox['status'] == 'done'
+    assert outbox['result']['blockedByPolicy'] is True
+    assert any('权限闸门拦截派发' in item['remark'] for item in updated['flow_log'])
+
+
 def test_dispatch_skips_duplicate_unfinished_outbox(monkeypatch, tmp_path):
     """Repeated scans should not enqueue duplicate work for the same task/state/agent."""
     import server as srv

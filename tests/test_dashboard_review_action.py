@@ -76,3 +76,48 @@ def test_review_approve_allows_complete_todos(monkeypatch):
 
     assert result["ok"] is True
     assert saved["tasks"][0]["state"] == "Done"
+
+
+def test_menxia_approve_releases_policy_gate(monkeypatch):
+    """Approving a policy-held RunSpec should release the dispatch gate."""
+    tasks = [{
+        "id": "JJC-REVIEW-POLICY",
+        "title": "policy gate",
+        "state": "Menxia",
+        "org": "门下省",
+        "now": "Policy Gate：等待权限审批",
+        "flow_log": [],
+        "runSpec": {
+            "policyGate": {
+                "decision": "hold_for_policy",
+                "status": "waiting_policy_approval",
+                "reason": "shell.execute 需要确认",
+                "requiresApproval": True,
+            },
+        },
+    }]
+    saved = {}
+    dispatches = []
+
+    monkeypatch.setattr(dashboard_server, "load_tasks", lambda: json.loads(json.dumps(tasks, ensure_ascii=False)))
+    monkeypatch.setattr(
+        dashboard_server,
+        "save_tasks",
+        lambda payload: saved.setdefault("tasks", json.loads(json.dumps(payload, ensure_ascii=False))),
+    )
+    monkeypatch.setattr(dashboard_server, "dispatch_for_state", lambda *args, **kwargs: dispatches.append((args, kwargs)))
+
+    result = dashboard_server.handle_review_action("JJC-REVIEW-POLICY", "approve", "同意执行")
+
+    assert result["ok"] is True
+    task = saved["tasks"][0]
+    gate = task["runSpec"]["policyGate"]
+    sched = task["_scheduler"]
+    assert task["state"] == "Assigned"
+    assert gate["decision"] == "auto_dispatch"
+    assert gate["status"] == "approved"
+    assert gate["requiresApproval"] is False
+    assert gate["approvedBy"] == "menxia"
+    assert sched["policyGateDecision"] == "auto_dispatch"
+    assert sched["policyGateStatus"] == "approved"
+    assert dispatches

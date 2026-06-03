@@ -2233,6 +2233,53 @@ def _policy_gate_for_run(mode, risk_level, tool_policy):
     }
 
 
+def _task_run_spec(task):
+    task = task or {}
+    run_spec = task.get('runSpec')
+    if isinstance(run_spec, dict):
+        return run_spec
+    params = task.get('templateParams')
+    if isinstance(params, dict):
+        return params
+    return {}
+
+
+def _task_policy_gate(task):
+    run_spec = _task_run_spec(task)
+    gate = run_spec.get('policyGate') if isinstance(run_spec, dict) else None
+    return gate if isinstance(gate, dict) else {}
+
+
+def _task_policy_gate_blocks_dispatch(task):
+    gate = _task_policy_gate(task)
+    decision = str(gate.get('decision') or '').strip()
+    if not decision or decision == 'auto_dispatch':
+        return False, gate
+    status = str(gate.get('status') or '').strip()
+    if status in {'approved', 'released', 'bypassed'}:
+        return False, gate
+    return True, gate
+
+
+def _release_task_policy_gate(task, actor='dashboard', comment=''):
+    gate = _task_policy_gate(task)
+    if not gate:
+        return
+    if str(gate.get('decision') or '') == 'auto_dispatch':
+        return
+    ts = now_iso()
+    gate['previousDecision'] = gate.get('decision', '')
+    gate['previousStatus'] = gate.get('status', '')
+    gate['decision'] = 'auto_dispatch'
+    gate['status'] = 'approved'
+    gate['label'] = '已批准执行'
+    gate['requiresApproval'] = False
+    gate['approvedAt'] = ts
+    gate['approvedBy'] = actor
+    gate['approvalComment'] = comment[:300] if comment else ''
+    gate['releaseAction'] = ''
+
+
 def _execution_isolation_for_run(capability_ids, risk_level, run_kind, mode):
     """Describe how a run should be isolated before the real worktree allocator exists."""
     cap_set = set(capability_ids or [])
@@ -3028,6 +3075,7 @@ def handle_review_action(task_id, action, comment=''):
     _scheduler_snapshot(task, f'review-before-{action}')
 
     if action == 'approve':
+        _release_task_policy_gate(task, actor='menxia', comment=comment)
         if task['state'] == 'Menxia':
             task['state'] = 'Assigned'
             task['now'] = '门下省准奏，移交尚书省派发'
@@ -3058,6 +3106,12 @@ def handle_review_action(task_id, action, comment=''):
         'remark': remark
     })
     _scheduler_mark_progress(task, f'审议动作 {action} -> {task.get("state")}')
+    sched = _ensure_scheduler(task)
+    gate = _task_policy_gate(task)
+    if gate:
+        sched['policyGateDecision'] = gate.get('decision', '')
+        sched['policyGateStatus'] = gate.get('status', '')
+        sched['policyGateReason'] = gate.get('reason', '')
     task['updatedAt'] = now_iso()
     save_tasks(tasks)
 
@@ -4234,6 +4288,17 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
             'label': '调度已禁用',
             'detail': '自动派发被关闭，平台不会继续推动当前任务。',
             'nextAction': '需要继续时先恢复调度或手动推进',
+            'action': 'none',
+            'actionLabel': '',
+            'actionReason': '',
+            'retryable': False,
+        }
+    if status == 'policy-held':
+        return {
+            'tone': 'warn',
+            'label': '等待权限审批',
+            'detail': error or 'RunSpec 权限闸门尚未释放，系统已暂停自动派发。',
+            'nextAction': '在门下省准奏或补充确认后再继续执行',
             'action': 'none',
             'actionLabel': '',
             'actionReason': '',
@@ -6865,6 +6930,24 @@ def _execute_dispatch_outbox_item(item):
             return False
         return bool(updated)
 
+    policy_blocked, policy_gate = _task_policy_gate_blocks_dispatch(task)
+    if policy_blocked:
+        reason = policy_gate.get('reason') or '执行前需要权限审批或审议准奏'
+        flow_msg = f'权限闸门拦截派发：{reason}'
+        if _update_if_current('policy-held', error=reason, flow_remark=flow_msg):
+            _append_runtime_event('dispatch_policy_blocked', task_id, agent_id, {
+                'from': runtime_label,
+                'to': agent_id,
+                'trigger': trigger,
+                'status': 'policy-held',
+                'dispatchId': dispatch_id,
+                'policyGate': policy_gate,
+                'reason': reason,
+                'remark': 'RunSpec 权限闸门未释放，worker 已停止执行',
+            }, confidence='high', trace_id=trace_id)
+            _outbox_mark_done(dispatch_id, {'status': 'policy-held', 'blockedByPolicy': True})
+        return
+
     try:
         import time as _time
         gw_alive = False
@@ -7182,6 +7265,41 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
         }, trace_id=trace_id)
         _kick_dispatch_worker()
         log.info(f'ℹ️ {task_id} 已有未完成派发，跳过重复入队 → {agent_id}')
+        return
+
+    policy_blocked, policy_gate = _task_policy_gate_blocks_dispatch(task)
+    if policy_blocked:
+        reason = policy_gate.get('reason') or '执行前需要权限审批或审议准奏'
+        status = policy_gate.get('status') or 'waiting_policy_approval'
+        _update_task_scheduler(task_id, lambda t, s: (
+            s.update({
+                'lastDispatchAt': dispatch_started_at,
+                'lastDispatchStatus': 'policy-held',
+                'lastDispatchAgent': agent_id,
+                'lastDispatchState': new_state,
+                'lastDispatchTrigger': trigger,
+                'lastDispatchError': reason,
+                'policyGateDecision': policy_gate.get('decision', ''),
+                'policyGateStatus': status,
+                'policyGateReason': reason,
+            }),
+            s.pop('activeDispatchId', None),
+            s.pop('activeDispatchState', None),
+            s.pop('activeDispatchStartedAt', None),
+            _scheduler_add_flow(t, f'权限闸门拦截派发：{reason}', to=_STATE_LABELS.get(new_state, new_state))
+        ))
+        _append_runtime_event('dispatch_policy_blocked', task_id, agent_id, {
+            'from': 'scheduler',
+            'to': agent_id,
+            'newState': new_state,
+            'trigger': trigger,
+            'status': 'policy-held',
+            'dispatchId': dispatch_id,
+            'policyGate': policy_gate,
+            'reason': reason,
+            'remark': 'RunSpec 权限闸门未释放，派发已拦截',
+        }, confidence='high', trace_id=trace_id)
+        log.info(f'⏸️ {task_id} 派发被权限闸门拦截 → {agent_id}: {reason}')
         return
 
     execution_isolation = _task_execution_isolation(task)
