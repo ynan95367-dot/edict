@@ -119,6 +119,8 @@ textarea:focus-visible {
 .cmd-intent-main span { display: block; color: var(--muted); font-size: 10px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; }
 .cmd-intent-main b { display: block; color: var(--text); font-size: 14px; font-weight: 850; margin-top: 1px; overflow-wrap: anywhere; }
 .cmd-intent-main small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; line-height: 1.45; overflow-wrap: anywhere; }
+.cmd-intent-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.cmd-intent-tags em { font-style: normal; min-height: 22px; display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 999px; border: 1px solid rgba(89,208,194,.34); color: var(--jade); background: rgba(89,208,194,.09); font-size: 10px; font-weight: 800; }
 .cmd-mode-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
 .cmd-mode { min-height: 64px; text-align: left; padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(59,51,40,.95); background: rgba(33,29,23,.72); color: var(--text); cursor: pointer; transition: border-color .18s, background .18s, transform .18s; }
 .cmd-mode:hover { transform: translateY(-1px); border-color: rgba(217,174,95,.5); }

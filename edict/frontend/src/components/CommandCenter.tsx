@@ -233,9 +233,16 @@ export default function CommandCenter() {
     executionIsolation.rollback ? `Rollback ${executionIsolation.rollback}` : '',
   ].filter(Boolean) : [];
   const clarification = previewRun?.clarification || previewRun?.profile?.clarification;
+  const intentProfile = previewRun?.intentProfile || previewRun?.intent?.profile || previewRun?.profile?.intent;
+  const intentTags = [
+    intentProfile?.action,
+    intentProfile?.category,
+    intentProfile?.targetDept,
+    intentProfile?.confidence ? `${intentProfile.confidence}%` : '',
+  ].filter((item): item is string => !!item);
   const intentReason = previewLoading
     ? '正在识别目标...'
-    : previewError || clarification?.summary || previewRun?.intent?.reason || (goal.trim() ? '等待后端识别' : '输入目标后自动识别');
+    : previewError || intentProfile?.summary || clarification?.summary || previewRun?.intent?.reason || (goal.trim() ? '等待后端识别' : '输入目标后自动识别');
   const priorityReason = priority === 'auto'
     ? previewRun?.profile?.priority?.source === 'inferred'
       ? '后端根据目标推断'
@@ -347,6 +354,11 @@ export default function CommandCenter() {
                   : `${selectedMode?.label || effectiveMode}（手动）`}
               </b>
               <small>{mode === 'auto' ? intentReason : selectedMode?.detail}</small>
+              {!!intentTags.length && (
+                <div className="cmd-intent-tags">
+                  {intentTags.map((item) => <em key={item}>{item}</em>)}
+                </div>
+              )}
             </div>
           </div>
           <button type="button" className="cmd-ghost" onClick={() => setShowRunControls((value) => !value)}>

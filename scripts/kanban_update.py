@@ -37,6 +37,8 @@ import json, pathlib, sys, subprocess, logging, os, re, uuid
 from utils import python_bin
 
 _BASE = pathlib.Path(os.environ['EDICT_HOME']) if 'EDICT_HOME' in os.environ else pathlib.Path(__file__).resolve().parent.parent
+if str(_BASE) not in sys.path:
+    sys.path.insert(0, str(_BASE))
 TASKS_FILE = _BASE / 'data' / 'tasks_source.json'
 REFRESH_SCRIPT = _BASE / 'scripts' / 'refresh_live_data.py'
 
@@ -57,10 +59,28 @@ try:
 except Exception:  # pragma: no cover - outbox must not break kanban writes
     _outbox_enqueue_handoff = None
 
+try:
+    from edict.control_plane import (  # noqa: E402
+        AGENT_LABELS as CONTROL_AGENT_LABELS,
+        ORG_AGENT_MAP as CONTROL_ORG_AGENT_MAP,
+        STATE_AGENT_MAP as CONTROL_STATE_AGENT_MAP,
+        STATE_ORG_MAP as CONTROL_STATE_ORG_MAP,
+        STATE_TRANSITIONS as CONTROL_STATE_TRANSITIONS,
+    )
+except Exception:  # pragma: no cover - legacy deployments may not contain edict/
+    CONTROL_AGENT_LABELS = None
+    CONTROL_ORG_AGENT_MAP = None
+    CONTROL_STATE_AGENT_MAP = None
+    CONTROL_STATE_ORG_MAP = None
+    CONTROL_STATE_TRANSITIONS = None
+
 
 # ── 从 task.py 动态加载权威状态转换表（Single Source of Truth）──
 def _load_canonical_transitions() -> dict:
     """从 edict/backend 源码解析状态转换表，无需 import（避免 SQLAlchemy 依赖）。"""
+    if CONTROL_STATE_TRANSITIONS:
+        return {state: set(targets) for state, targets in CONTROL_STATE_TRANSITIONS.items()}
+
     task_py = _BASE / "edict" / "backend" / "app" / "models" / "task.py"
     source = task_py.read_text(encoding="utf-8")
 
@@ -86,35 +106,41 @@ def _load_canonical_transitions() -> dict:
     return local_ns["_result"]
 
 
-STATE_ORG_MAP = {
+_FALLBACK_STATE_ORG_MAP = {
     'Taizi': '太子', 'Zhongshu': '中书省', 'Menxia': '门下省',
     'Assigned': '尚书省', 'Next': '尚书省',
     'Doing': '执行中', 'Review': '尚书省', 'Done': '完成', 'Blocked': '阻塞',
-    'PendingConfirm': '尚书省', 'Pending': '中书省',
+    'PendingConfirm': '尚书省', 'Pending': '中书省', 'Cancelled': '已取消',
 }
+STATE_ORG_MAP = dict(CONTROL_STATE_ORG_MAP or _FALLBACK_STATE_ORG_MAP)
 
-_STATE_AGENT_MAP = {
+_FALLBACK_STATE_AGENT_MAP = {
     'Taizi': 'taizi',
     'Zhongshu': 'zhongshu',
     'Menxia': 'menxia',
     'Assigned': 'shangshu',
+    'Doing': None,
+    'Next': None,
     'Review': 'shangshu',
     'Pending': 'zhongshu',
     'PendingConfirm': 'shangshu',
 }
+_STATE_AGENT_MAP = dict(CONTROL_STATE_AGENT_MAP or _FALLBACK_STATE_AGENT_MAP)
 
-_ORG_AGENT_MAP = {
+_FALLBACK_ORG_AGENT_MAP = {
     '礼部': 'libu', '户部': 'hubu', '兵部': 'bingbu',
     '刑部': 'xingbu', '工部': 'gongbu', '吏部': 'libu_hr',
     '中书省': 'zhongshu', '门下省': 'menxia', '尚书省': 'shangshu',
 }
+_ORG_AGENT_MAP = dict(CONTROL_ORG_AGENT_MAP or _FALLBACK_ORG_AGENT_MAP)
 
-_AGENT_LABELS = {
+_FALLBACK_AGENT_LABELS = {
     'main': '太子', 'taizi': '太子',
     'zhongshu': '中书省', 'menxia': '门下省', 'shangshu': '尚书省',
     'libu': '礼部', 'hubu': '户部', 'bingbu': '兵部', 'xingbu': '刑部',
     'gongbu': '工部', 'libu_hr': '吏部', 'zaochao': '钦天监',
 }
+_AGENT_LABELS = dict(CONTROL_AGENT_LABELS or _FALLBACK_AGENT_LABELS)
 
 _KNOWN_ORG_LABELS = {
     '太子', '中书省', '门下省', '尚书省',

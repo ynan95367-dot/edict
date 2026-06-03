@@ -282,7 +282,9 @@ export interface RunSpec {
     mode?: string;
     reason?: string;
     clarification?: RunClarification;
+    profile?: RunIntentProfile;
   };
+  intentProfile?: RunIntentProfile;
   clarification?: RunClarification;
   status: string;
   runKind: string;
@@ -314,6 +316,21 @@ export interface RunProfile {
   priority?: RunProfileField;
   targetDept?: RunProfileField;
   clarification?: RunClarification;
+  intent?: RunIntentProfile;
+}
+
+export interface RunIntentProfile {
+  action?: string;
+  category?: string;
+  runKind?: string;
+  modeLabel?: string;
+  confidence?: number;
+  targetDept?: string;
+  riskLevel?: string;
+  summary?: string;
+  reasons?: string[];
+  route?: Array<{ stage?: string; dept?: string; label?: string }>;
+  manualRequired?: boolean;
 }
 
 export interface RunClarification {

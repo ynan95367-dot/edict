@@ -78,6 +78,8 @@ _SAFE_NAME_RE = re.compile(r'^[a-zA-Z0-9_\-\u4e00-\u9fff]+$')
 
 BASE = pathlib.Path(__file__).parent
 PROJECT_ROOT = BASE.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 DIST = BASE / 'dist'          # React 构建产物 (npm run build)
 DATA = BASE.parent / "data"
 SCRIPTS = BASE.parent / 'scripts'
@@ -111,6 +113,16 @@ _MODEL_CONNECTIVITY_RE = re.compile(
     r'invalid model|rate limit|too many requests|overloaded|connection|econn|socket|'
     r'network|429|500|502|503|504|模型|连接|限流|不可用|失败)',
     re.I,
+)
+
+from edict.control_plane import (
+    AGENT_DEPTS as CONTROL_AGENT_DEPTS,
+    ORG_AGENT_MAP as CONTROL_ORG_AGENT_MAP,
+    STATE_AGENT_MAP as CONTROL_STATE_AGENT_MAP,
+    STATE_FLOW as CONTROL_STATE_FLOW,
+    STATE_LABELS as CONTROL_STATE_LABELS,
+    TERMINAL_STATES as CONTROL_TERMINAL_STATES,
+    as_serializable_contract as control_plane_contract,
 )
 
 
@@ -2825,6 +2837,67 @@ def _intent_clarification(goal, capability_ids, run_kind, mode, deliverable_inpu
     }
 
 
+def _intent_auto_profile(goal, capability_ids, run_kind, mode, risk_level, target_dept, priority, clarification):
+    text = (goal or '').lower()
+    action_rules = [
+        ('排障修复', ['为什么', '失败', '报错', '不能用', '没效果', '卡住', '修复', '排查', '检查']),
+        ('实现改造', ['实现', '接入', '新增', '增加', '开发', '改造', '升级']),
+        ('优化体验', ['优化', 'ui', 'ux', '面板', '页面', '颜色', '布局', '简洁']),
+        ('生成产物', ['生成', '写', '输出', '报告', '文章', 'ppt', '文档']),
+        ('分析规划', ['分析', '调研', '规划', '方案', '建议', '评估']),
+    ]
+    object_rules = [
+        ('模型配置', ['模型', 'opencode', 'open code', 'openclaw', 'provider', 'api key', '延迟']),
+        ('调度链路', ['派发', '调度', '太子', '任务', 'worker', '队列', 'trace', 'session']),
+        ('界面体验', ['ui', 'ux', '页面', '面板', '颜色', '布局', '展示栏']),
+        ('代码仓库', ['代码', '仓库', 'bug', '测试', '构建', 'commit', 'pr']),
+        ('办公文档', ['ppt', 'word', 'excel', 'pdf', '文档', '表格', '幻灯片']),
+        ('输出产物', ['输出', '报告', '文章', '文件', '链接', '产物']),
+    ]
+    action = next((label for label, words in action_rules if any(word in text for word in words)), '执行任务')
+    category = next((label for label, words in object_rules if any(word in text for word in words)), {
+        'coding': '代码仓库',
+        'system': '系统命令',
+        'web': '网页浏览',
+        'document': '办公文档',
+        'writing': '内容写作',
+    }.get(run_kind, '通用任务'))
+    mode_label = {
+        'execute': '可直接执行',
+        'interactive': '边做边确认',
+        'plan': '先出方案',
+    }.get(mode, mode or '自动判断')
+    confidence = int(clarification.get('score') or 0) if isinstance(clarification, dict) else 0
+    reasons = []
+    if capability_ids:
+        reasons.append('能力：' + ' / '.join(capability_ids[:4]))
+    if risk_level:
+        reasons.append(f'风险：{risk_level}')
+    if priority:
+        reasons.append(f'优先级：{priority}')
+    if isinstance(clarification, dict) and clarification.get('missing'):
+        reasons.append('缺口：' + ' / '.join(clarification.get('missing')[:2]))
+    route = [
+        {'stage': 'intake', 'dept': '太子', 'label': '分拣意图'},
+        {'stage': 'plan', 'dept': '中书省', 'label': '生成 RunSpec'},
+        {'stage': 'review' if mode in ('plan', 'interactive') else 'dispatch', 'dept': '门下省' if mode in ('plan', 'interactive') else '尚书省', 'label': mode_label},
+        {'stage': 'execute', 'dept': target_dept or '尚书省', 'label': action},
+    ]
+    return {
+        'action': action,
+        'category': category,
+        'runKind': run_kind,
+        'modeLabel': mode_label,
+        'confidence': confidence,
+        'targetDept': target_dept,
+        'riskLevel': risk_level,
+        'summary': f'识别为「{category}」的「{action}」，{mode_label}，目标部门 {target_dept or "尚书省"}。',
+        'reasons': reasons[:4],
+        'route': route,
+        'manualRequired': bool(isinstance(clarification, dict) and clarification.get('shouldAsk')),
+    }
+
+
 def list_run_specs(limit=100):
     specs = atomic_json_read(_run_specs_file(), [])
     if not isinstance(specs, list):
@@ -2873,12 +2946,23 @@ def _prepare_run_spec(payload, run_id='RUN-PREVIEW', task_id='', created_at='', 
     tool_policy = _tool_policy_for_run(capability_ids, risk_level, mode, capability_policies)
     policy_gate = _policy_gate_for_run(mode, risk_level, tool_policy)
     execution_isolation = _execution_isolation_for_run(capability_ids, risk_level, run_kind, mode)
+    intent_profile = _intent_auto_profile(
+        goal,
+        capability_ids,
+        run_kind,
+        mode,
+        risk_level,
+        target_dept,
+        priority,
+        clarification,
+    )
     profile = {
         'deliverable': {'value': deliverable, 'source': 'user' if deliverable_input else 'inferred'},
         'constraints': {'value': constraints, 'source': 'user' if constraints_input else 'inferred'},
         'priority': {'value': priority, 'requested': requested_priority, 'source': priority_source},
         'targetDept': {'value': target_dept, 'source': 'user' if str(payload.get('targetDept') or '').strip() else 'inferred'},
         'clarification': clarification,
+        'intent': intent_profile,
     }
     title = re.split(r'\n+', goal, maxsplit=1)[0].strip()
     if len(title) > 100:
@@ -2897,7 +2981,9 @@ def _prepare_run_spec(payload, run_id='RUN-PREVIEW', task_id='', created_at='', 
             'mode': mode,
             'reason': intent_reason,
             'clarification': clarification,
+            'profile': intent_profile,
         },
+        'intentProfile': intent_profile,
         'clarification': clarification,
         'status': 'preview' if not persisted else policy_gate.get('status', 'created'),
         'runKind': run_kind,
@@ -3147,19 +3233,7 @@ def handle_review_action(task_id, action, comment=''):
 
 # ══ Agent 在线状态检测 ══
 
-_AGENT_DEPTS = [
-    {'id':'taizi',   'label':'太子',  'emoji':'🤴', 'role':'太子',     'rank':'储君'},
-    {'id':'zhongshu','label':'中书省','emoji':'📜', 'role':'中书令',   'rank':'正一品'},
-    {'id':'menxia',  'label':'门下省','emoji':'🔍', 'role':'侍中',     'rank':'正一品'},
-    {'id':'shangshu','label':'尚书省','emoji':'📮', 'role':'尚书令',   'rank':'正一品'},
-    {'id':'hubu',    'label':'户部',  'emoji':'💰', 'role':'户部尚书', 'rank':'正二品'},
-    {'id':'libu',    'label':'礼部',  'emoji':'📝', 'role':'礼部尚书', 'rank':'正二品'},
-    {'id':'bingbu',  'label':'兵部',  'emoji':'⚔️', 'role':'兵部尚书', 'rank':'正二品'},
-    {'id':'xingbu',  'label':'刑部',  'emoji':'⚖️', 'role':'刑部尚书', 'rank':'正二品'},
-    {'id':'gongbu',  'label':'工部',  'emoji':'🔧', 'role':'工部尚书', 'rank':'正二品'},
-    {'id':'libu_hr', 'label':'吏部',  'emoji':'👔', 'role':'吏部尚书', 'rank':'正二品'},
-    {'id':'zaochao', 'label':'钦天监','emoji':'📰', 'role':'朝报官',   'rank':'正三品'},
-]
+_AGENT_DEPTS = [dict(item) for item in CONTROL_AGENT_DEPTS]
 
 
 def _agent_display_label(agent_id):
@@ -5536,29 +5610,16 @@ def wake_agent(agent_id, message=''):
 
 # ══ Agent 实时活动读取 ══
 
-# 状态 → agent_id 映射
-_STATE_AGENT_MAP = {
-    'Taizi': 'taizi',
-    'Zhongshu': 'zhongshu',
-    'Menxia': 'menxia',
-    'Assigned': 'shangshu',
-    'Doing': None,         # 六部，需从 org 推断
-    'Review': 'shangshu',
-    'Next': None,          # 待执行，从 org 推断
-    'Pending': 'zhongshu', # 待处理，默认中书省
-}
-_ORG_AGENT_MAP = {
-    '礼部': 'libu', '户部': 'hubu', '兵部': 'bingbu',
-    '刑部': 'xingbu', '工部': 'gongbu', '吏部': 'libu_hr',
-    '中书省': 'zhongshu', '门下省': 'menxia', '尚书省': 'shangshu',
-}
+# 状态 → agent_id 映射（来自共享控制面契约）
+_STATE_AGENT_MAP = dict(CONTROL_STATE_AGENT_MAP)
+_ORG_AGENT_MAP = dict(CONTROL_ORG_AGENT_MAP)
 _BASE_AGENT_IDS = {
     agent_id for agent_id in list(_STATE_AGENT_MAP.values()) + list(_ORG_AGENT_MAP.values())
     if agent_id
 }
 _ACTIVITY_UI_LIMIT = 240
 
-_TERMINAL_STATES = {'Done', 'Cancelled'}
+_TERMINAL_STATES = set(CONTROL_TERMINAL_STATES)
 
 
 def _known_agent_ids():
@@ -8813,21 +8874,9 @@ def get_task_evidence(task_id):
     }
 
 
-# 状态推进顺序（手动推进用）
-_STATE_FLOW = {
-    'Pending':  ('Taizi', '皇上', '太子', '待处理旨意转交太子分拣'),
-    'Taizi':    ('Zhongshu', '太子', '中书省', '太子分拣完毕，转中书省起草'),
-    'Zhongshu': ('Menxia', '中书省', '门下省', '中书省方案提交门下省审议'),
-    'Menxia':   ('Assigned', '门下省', '尚书省', '门下省准奏，转尚书省派发'),
-    'Assigned': ('Doing', '尚书省', '六部', '尚书省开始派发执行'),
-    'Next':     ('Doing', '尚书省', '六部', '待执行任务开始执行'),
-    'Doing':    ('Review', '六部', '尚书省', '各部完成，进入汇总'),
-    'Review':   ('Done', '尚书省', '太子', '全流程完成，回奏太子转报皇上'),
-}
-_STATE_LABELS = {
-    'Pending': '待处理', 'Taizi': '太子', 'Zhongshu': '中书省', 'Menxia': '门下省',
-    'Assigned': '尚书省', 'Next': '待执行', 'Doing': '执行中', 'Review': '审查', 'Done': '完成',
-}
+# 状态推进顺序（手动推进用，来自共享控制面契约）
+_STATE_FLOW = dict(CONTROL_STATE_FLOW)
+_STATE_LABELS = dict(CONTROL_STATE_LABELS)
 
 
 def _build_dispatch_payload(task_id, task, new_state, agent_id, trigger):
@@ -9815,6 +9864,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(get_model_registry(force=force_refresh))
         elif p == '/api/capabilities':
             self.send_json(list_capabilities())
+        elif p == '/api/control-plane-contract':
+            contract = control_plane_contract()
+            contract['generatedAt'] = now_iso()
+            contract['source'] = 'edict.control_plane'
+            self.send_json(contract)
         elif p == '/api/run-specs':
             try:
                 limit = int((qs.get('limit') or ['100'])[0])

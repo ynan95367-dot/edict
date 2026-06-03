@@ -81,6 +81,27 @@ def test_state_transitions_consistent():
         )
 
 
+def test_task_transitions_match_control_plane_contract():
+    """task.py 和共享控制面契约必须保持一致。"""
+    from edict.control_plane import STATE_TRANSITIONS
+
+    pg = _load_pg_transitions()
+    contract = {state: set(targets) for state, targets in STATE_TRANSITIONS.items() if targets}
+    assert pg == contract
+
+
+def test_dashboard_uses_control_plane_contract():
+    """dashboard 手动推进和 Agent 映射必须来自同一套控制面契约。"""
+    import server as srv
+    from edict.control_plane import ORG_AGENT_MAP, STATE_AGENT_MAP, STATE_FLOW, STATE_LABELS, TERMINAL_STATES
+
+    assert srv._STATE_AGENT_MAP == dict(STATE_AGENT_MAP)
+    assert srv._ORG_AGENT_MAP == dict(ORG_AGENT_MAP)
+    assert srv._STATE_FLOW == dict(STATE_FLOW)
+    assert srv._STATE_LABELS == dict(STATE_LABELS)
+    assert srv._TERMINAL_STATES == set(TERMINAL_STATES)
+
+
 def test_pending_confirm_exists():
     """PendingConfirm 必须在两侧都存在。"""
     import kanban_update as kb

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import enum
+import pathlib
+import sys
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -10,6 +12,19 @@ from sqlalchemy import Boolean, Column, DateTime, Enum, Index, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from ..db import Base
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from edict.control_plane import (
+    ORG_AGENT_MAP as CONTROL_ORG_AGENT_MAP,
+    STATE_AGENT_MAP as CONTROL_STATE_AGENT_MAP,
+    STATE_ORG_MAP as CONTROL_STATE_ORG_MAP,
+    STATE_TRANSITIONS as CONTROL_STATE_TRANSITIONS,
+    TERMINAL_STATES as CONTROL_TERMINAL_STATES,
+    org_for_state as control_org_for_state,
+)
 
 
 class TaskState(str, enum.Enum):
@@ -29,7 +44,7 @@ class TaskState(str, enum.Enum):
     PendingConfirm = "PendingConfirm"
 
 
-TERMINAL_STATES = {TaskState.Done, TaskState.Cancelled}
+TERMINAL_STATES = {TaskState(state) for state in CONTROL_TERMINAL_STATES}
 
 STATE_TRANSITIONS = {
     TaskState.Pending: {TaskState.Taizi, TaskState.Cancelled},
@@ -53,33 +68,29 @@ STATE_TRANSITIONS = {
     },
 }
 
+
+def _contract_transitions() -> dict[TaskState, set[TaskState]]:
+    return {
+        TaskState(state): {TaskState(target) for target in targets}
+        for state, targets in CONTROL_STATE_TRANSITIONS.items()
+        if targets
+    }
+
+
+assert STATE_TRANSITIONS == _contract_transitions(), "Task state transitions drift from edict.control_plane"
+
 STATE_AGENT_MAP = {
-    TaskState.Taizi: "taizi",
-    TaskState.Zhongshu: "zhongshu",
-    TaskState.Menxia: "menxia",
-    TaskState.Assigned: "shangshu",
-    TaskState.Review: "shangshu",
-    TaskState.PendingConfirm: "shangshu",
-    TaskState.Pending: "zhongshu",
+    TaskState(state): agent
+    for state, agent in CONTROL_STATE_AGENT_MAP.items()
+    if state in TaskState.__members__ and agent
 }
 
-ORG_AGENT_MAP = {
-    "户部": "hubu",
-    "礼部": "libu",
-    "兵部": "bingbu",
-    "刑部": "xingbu",
-    "工部": "gongbu",
-    "吏部": "libu_hr",
-}
+ORG_AGENT_MAP = dict(CONTROL_ORG_AGENT_MAP)
 
 STATE_ORG_MAP = {
-    TaskState.Taizi: "太子",
-    TaskState.Zhongshu: "中书省",
-    TaskState.Menxia: "门下省",
-    TaskState.Assigned: "尚书省",
-    TaskState.Review: "尚书省",
-    TaskState.PendingConfirm: "尚书省",
-    TaskState.Pending: "中书省",
+    TaskState(state): org
+    for state, org in CONTROL_STATE_ORG_MAP.items()
+    if state in TaskState.__members__
 }
 
 
@@ -141,9 +152,8 @@ class Task(Base):
 
     @staticmethod
     def org_for_state(state: TaskState, assignee_org: str | None = None) -> str:
-        if state in {TaskState.Doing, TaskState.Next}:
-            return assignee_org or "六部"
-        return STATE_ORG_MAP.get(state, assignee_org or "太子")
+        value = state.value if isinstance(state, TaskState) else str(state or "")
+        return control_org_for_state(value, assignee_org)
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为 API 响应格式，并兼容旧 live_status 字段。"""
