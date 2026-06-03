@@ -8420,6 +8420,399 @@ def get_task_activity(task_id):
     return result
 
 
+def _evidence_status(status='', tone=''):
+    raw = str(status or tone or '').lower()
+    if raw in {'ok', 'done', 'success', 'completed', 'pass', 'bound'}:
+        return 'ok'
+    if raw in {'failed', 'fail', 'error', 'err', 'timeout', 'offline', 'trace-mismatch'}:
+        return 'err'
+    if raw in {'pending', 'running', 'queued', 'warn', 'degraded', 'stale', 'unbound'}:
+        return 'warn'
+    if raw in {'idle', 'unknown', ''}:
+        return 'idle'
+    return 'warn'
+
+
+def _evidence_text(value, limit=220):
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    text = re.sub(r'\s+', ' ', text)
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + '…'
+
+
+def _evidence_time(item, *fields):
+    if not isinstance(item, dict):
+        return ''
+    for field in fields:
+        value = item.get(field)
+        if value:
+            return str(value)
+    return ''
+
+
+def _evidence_add(timeline, *, lane, title, at='', detail='', status='idle', source='', agent_id='', trace_id='', session_id='', message_id='', dispatch_id='', evidence=None):
+    title = _evidence_text(title, 120)
+    detail = _evidence_text(detail, 260)
+    if not title and not detail:
+        return
+    timeline.append({
+        'lane': lane,
+        'title': title or lane,
+        'detail': detail,
+        'status': _evidence_status(status),
+        'at': str(at or ''),
+        'source': source,
+        'agentId': agent_id,
+        'traceId': trace_id,
+        'sessionId': session_id,
+        'messageId': message_id,
+        'dispatchId': dispatch_id,
+        'evidence': evidence or {},
+    })
+
+
+def _activity_evidence_title(entry):
+    kind = entry.get('kind', '')
+    if kind == 'flow':
+        return f"{entry.get('from') or '系统'} → {entry.get('to') or ''}".strip()
+    if kind == 'progress':
+        return '进展更新'
+    if kind == 'todos':
+        return '子任务更新'
+    if kind == 'assistant':
+        return 'Agent 响应'
+    if kind == 'tool_result':
+        return f"{entry.get('tool') or 'tool'} 结果"
+    if kind == 'user':
+        return '用户指令'
+    return entry.get('eventKind') or kind or '事件'
+
+
+def _activity_evidence_lane(entry):
+    kind = entry.get('kind', '')
+    event_kind = str(entry.get('eventKind') or '').lower()
+    if kind == 'tool_result' or 'tool' in event_kind:
+        return 'tool'
+    if kind == 'flow':
+        return 'governance'
+    if kind in {'progress', 'todos'}:
+        return 'state'
+    if 'dispatch' in event_kind:
+        return 'dispatch'
+    if 'model' in event_kind:
+        return 'model'
+    if kind in {'assistant', 'user'}:
+        return 'session'
+    return 'event'
+
+
+def _activity_evidence_detail(entry):
+    kind = entry.get('kind', '')
+    if kind == 'flow':
+        return entry.get('remark', '')
+    if kind == 'progress':
+        return entry.get('text', '')
+    if kind == 'todos':
+        items = entry.get('items') if isinstance(entry.get('items'), list) else []
+        return f'{len(items)} 个 todo 快照'
+    if kind == 'assistant':
+        tools = entry.get('tools') if isinstance(entry.get('tools'), list) else []
+        if tools:
+            return '工具调用：' + '、'.join(str(t.get('name') or 'tool') for t in tools[:4] if isinstance(t, dict))
+        return entry.get('thinking') or entry.get('text') or ''
+    if kind == 'tool_result':
+        return entry.get('output', '')
+    return entry.get('text') or entry.get('remark') or entry.get('eventKind') or ''
+
+
+def _runtime_session_status_label(status):
+    if status == 'bound':
+        return '已绑定'
+    if status == 'trace-mismatch':
+        return 'Trace 不一致'
+    if status == 'unbound':
+        return '未绑定'
+    if status == 'observed':
+        return '已观测'
+    return status or '未知'
+
+
+def get_task_evidence(task_id):
+    """Return a compact, single-task evidence chain for diagnosis UI."""
+    tasks = load_tasks()
+    task = next((t for t in tasks if t.get('id') == task_id), None)
+    if not task:
+        return {'ok': False, 'error': f'任务 {task_id} 不存在'}
+
+    activity_data = get_task_activity(task_id)
+    sched_data = get_scheduler_state(task_id)
+    coding_data = get_task_coding_session(task_id)
+    trace_id = (
+        activity_data.get('traceId')
+        or sched_data.get('traceId')
+        or task.get('traceId')
+        or task.get('trace_id')
+        or task_id
+    )
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+    raw_outbox = _outbox_list(task_id=task_id, limit=200)
+    task_map = {task_id: task}
+    outbox_items = [_public_outbox_item(item, task_map, now_dt) for item in raw_outbox]
+    outbox_ids = {item.get('id', '') for item in raw_outbox if isinstance(item, dict)}
+    outbox_summary = sched_data.get('outbox') or _outbox_task_summary(task_id)
+    runtime_session = sched_data.get('runtimeSession') or {}
+    scheduler = sched_data.get('scheduler') or {}
+    diagnosis = sched_data.get('dispatchDiagnosis') or {}
+    coding_summary = coding_data.get('summary') if coding_data.get('ok') else {}
+    missing_layers = list(coding_data.get('missingLayers') or []) if coding_data.get('ok') else []
+
+    agent_ids = set(activity_data.get('relatedAgents') or [])
+    for value in (
+        sched_data.get('expectedAgent'),
+        scheduler.get('lastDispatchAgent'),
+        runtime_session.get('agentId'),
+    ):
+        if value:
+            agent_ids.add(value)
+    for item in raw_outbox:
+        if isinstance(item, dict) and item.get('agentId'):
+            agent_ids.add(item.get('agentId'))
+    if coding_data.get('ok'):
+        for collection in ('events', 'commands', 'tests'):
+            for event in coding_data.get(collection) or []:
+                if isinstance(event, dict) and event.get('agent'):
+                    agent_ids.add(event.get('agent'))
+
+    sessions = []
+    seen_sessions = set()
+    sched_sessions = scheduler.get('runtimeSessions') if isinstance(scheduler.get('runtimeSessions'), list) else []
+    for item in sched_sessions + ([runtime_session] if runtime_session else []):
+        if not isinstance(item, dict):
+            continue
+        sid = item.get('sessionId') or ''
+        if not sid or sid in seen_sessions:
+            continue
+        seen_sessions.add(sid)
+        sessions.append({
+            'sessionId': sid,
+            'traceId': item.get('traceId') or '',
+            'agentId': item.get('agentId') or '',
+            'runtime': item.get('runtime') or '',
+            'dispatchId': item.get('dispatchId') or '',
+            'trigger': item.get('trigger') or '',
+            'state': item.get('state') or '',
+            'boundAt': item.get('boundAt') or '',
+            'status': runtime_session.get('status') if sid == runtime_session.get('sessionId') else 'bound',
+        })
+    for entry in activity_data.get('activity') or []:
+        if not isinstance(entry, dict):
+            continue
+        sid = entry.get('sessionId') or _dict(entry.get('meta')).get('sessionId') or ''
+        if sid and sid not in seen_sessions:
+            seen_sessions.add(sid)
+            sessions.append({
+                'sessionId': sid,
+                'traceId': entry.get('traceId') or trace_id,
+                'agentId': entry.get('agent') or '',
+                'runtime': _agent_runtime(),
+                'dispatchId': entry.get('dispatchId') or '',
+                'trigger': '',
+                'state': '',
+                'boundAt': entry.get('at') or '',
+                'status': 'observed',
+            })
+
+    model_health = get_model_health()
+    models = []
+    for rec in model_health.get('agents') or []:
+        if not isinstance(rec, dict):
+            continue
+        related = (
+            rec.get('agentId') in agent_ids
+            or rec.get('lastTaskId') == task_id
+            or rec.get('lastDispatchId') in outbox_ids
+        )
+        if related:
+            models.append(rec)
+    model_failure_count = sum(
+        1 for rec in models
+        if _evidence_status(rec.get('status')) == 'err'
+    )
+    model_timeout_count = sum(1 for rec in models if rec.get('status') == 'timeout')
+
+    timeline = []
+    for item in raw_outbox:
+        if not isinstance(item, dict):
+            continue
+        payload = item.get('payload') if isinstance(item.get('payload'), dict) else {}
+        result = item.get('result') if isinstance(item.get('result'), dict) else {}
+        model_id = payload.get('model') or result.get('model') or ''
+        detail_parts = []
+        if item.get('trigger'):
+            detail_parts.append(f"触发 {item.get('trigger')}")
+        if model_id:
+            detail_parts.append(f"模型 {_model_label(model_id)}")
+        if item.get('lastError'):
+            detail_parts.append(_clean_runtime_error(item.get('lastError'), limit=180))
+        _evidence_add(
+            timeline,
+            lane='dispatch',
+            title=f"{_agent_display_label(item.get('agentId')) or item.get('agentId') or 'Agent'} 派发 {item.get('status')}",
+            detail=' · '.join(detail_parts),
+            at=_evidence_time(item, 'updatedAt', 'createdAt'),
+            status=item.get('status'),
+            source='runtime_outbox',
+            agent_id=item.get('agentId', ''),
+            trace_id=item.get('traceId') or trace_id,
+            dispatch_id=item.get('id', ''),
+            evidence={'attempts': item.get('attempts'), 'maxAttempts': item.get('maxAttempts'), 'model': model_id},
+        )
+    for session in sessions:
+        _evidence_add(
+            timeline,
+            lane='session',
+            title=f"OpenCode session {_runtime_session_status_label(session.get('status'))}",
+            detail=f"{_agent_display_label(session.get('agentId')) or session.get('agentId') or 'Agent'} · {session.get('runtime') or _agent_runtime()}",
+            at=session.get('boundAt', ''),
+            status=session.get('status'),
+            source='runtime_session',
+            agent_id=session.get('agentId', ''),
+            trace_id=session.get('traceId') or trace_id,
+            session_id=session.get('sessionId', ''),
+            dispatch_id=session.get('dispatchId', ''),
+        )
+    for rec in models:
+        status = rec.get('status') or 'unknown'
+        detail = rec.get('lastError') or (
+            f"{rec.get('lastLatencyMs')}ms" if isinstance(rec.get('lastLatencyMs'), (int, float)) else rec.get('source', '')
+        )
+        _evidence_add(
+            timeline,
+            lane='model',
+            title=f"{rec.get('agentLabel') or rec.get('agentId')} · {rec.get('modelLabel') or rec.get('model')}",
+            detail=detail,
+            at=rec.get('lastFailureAt') or rec.get('lastSuccessAt') or '',
+            status=status,
+            source=rec.get('source') or 'model_health',
+            agent_id=rec.get('agentId') or '',
+            dispatch_id=rec.get('lastDispatchId') or '',
+            evidence={'model': rec.get('model'), 'latencyMs': rec.get('lastLatencyMs'), 'fallbackModel': rec.get('fallbackModel')},
+        )
+    for entry in activity_data.get('activity') or []:
+        if not isinstance(entry, dict):
+            continue
+        status = 'err' if entry.get('exitCode') not in (None, 0) else 'ok'
+        _evidence_add(
+            timeline,
+            lane=_activity_evidence_lane(entry),
+            title=_activity_evidence_title(entry),
+            detail=_activity_evidence_detail(entry),
+            at=entry.get('at', ''),
+            status=status,
+            source=entry.get('source') or activity_data.get('activitySource') or '',
+            agent_id=entry.get('agent') or '',
+            trace_id=entry.get('traceId') or trace_id,
+            session_id=entry.get('sessionId') or _dict(entry.get('meta')).get('sessionId') or '',
+            message_id=entry.get('messageId') or _dict(entry.get('meta')).get('messageId') or '',
+            dispatch_id=entry.get('dispatchId') or '',
+            evidence={'kind': entry.get('kind'), 'eventKind': entry.get('eventKind'), 'eventId': entry.get('eventId')},
+        )
+    if coding_data.get('ok'):
+        for event in (coding_data.get('events') or [])[-60:]:
+            if not isinstance(event, dict):
+                continue
+            lane = 'file' if str(event.get('kind', '')).startswith('file.') else (
+                'test' if 'test' in str(event.get('kind', '')) else 'tool'
+            )
+            _evidence_add(
+                timeline,
+                lane=lane,
+                title=event.get('title') or event.get('kind') or '执行事件',
+                detail=event.get('detail') or event.get('path') or event.get('command') or '',
+                at=event.get('at') or '',
+                status=event.get('status') or 'ok',
+                source=event.get('source') or 'coding_session',
+                agent_id=event.get('agent') or '',
+                session_id=_dict(event.get('meta')).get('sessionId') or '',
+                message_id=_dict(event.get('meta')).get('messageId') or '',
+                evidence={'kind': event.get('kind'), 'path': event.get('path'), 'command': event.get('command')},
+            )
+
+    deduped = []
+    seen = set()
+    for item in sorted(timeline, key=lambda x: x.get('at') or ''):
+        key = (
+            item.get('lane'), item.get('title'), item.get('at'), item.get('sessionId'),
+            item.get('messageId'), item.get('dispatchId'), item.get('detail')[:80],
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    timeline = deduped[-160:]
+
+    diagnosis_tone = _evidence_status(diagnosis.get('tone'))
+    health_status = diagnosis_tone
+    if model_failure_count or int(outbox_summary.get('failed') or 0):
+        health_status = 'err'
+    elif missing_layers or int(outbox_summary.get('pending') or 0) or int(outbox_summary.get('running') or 0):
+        health_status = 'warn' if health_status != 'err' else health_status
+    elif health_status in {'idle', 'warn'} and task.get('state') in _TERMINAL_STATES:
+        health_status = 'ok'
+
+    health_label = diagnosis.get('label') or ('证据完整' if health_status == 'ok' else '证据不足')
+    next_action = diagnosis.get('nextAction') or ('检查 OpenCode session / outbox / 模型状态' if health_status != 'ok' else '无需处理')
+    summary = {
+        'eventCount': len(timeline),
+        'sessionCount': len(sessions),
+        'outboxTotal': int(outbox_summary.get('total') or 0),
+        'outboxPending': int(outbox_summary.get('pending') or 0),
+        'outboxRunning': int(outbox_summary.get('running') or 0),
+        'outboxFailed': int(outbox_summary.get('failed') or 0),
+        'fileCount': int(coding_summary.get('fileCount') or 0),
+        'commandCount': int(coding_summary.get('commandCount') or 0),
+        'testCount': int(coding_summary.get('testCount') or 0),
+        'outputCount': int(coding_summary.get('outputCount') or 0),
+        'modelCount': len(models),
+        'modelFailures': model_failure_count,
+        'modelTimeouts': model_timeout_count,
+        'missingLayerCount': len(missing_layers),
+    }
+    return {
+        'ok': True,
+        'taskId': task_id,
+        'traceId': trace_id,
+        'generatedAt': now_iso(),
+        'task': {
+            'title': task.get('title', ''),
+            'state': task.get('state', ''),
+            'org': task.get('org', ''),
+            'updatedAt': task.get('updatedAt', ''),
+            'stageLabel': _STATE_LABELS.get(task.get('state', ''), task.get('state', '')),
+        },
+        'health': {
+            'status': health_status,
+            'label': health_label,
+            'detail': diagnosis.get('detail') or activity_data.get('stateEvidence', {}).get('label') or '',
+            'nextAction': next_action,
+            'confidence': activity_data.get('stateEvidence', {}).get('confidence') or '',
+        },
+        'summary': summary,
+        'sessions': sessions[-12:],
+        'outbox': outbox_items[-20:],
+        'models': models,
+        'timeline': timeline,
+        'missingLayers': missing_layers,
+        'traceSummary': activity_data.get('traceSummary') or {},
+        'stateEvidence': activity_data.get('stateEvidence') or {},
+        'files': (coding_data.get('files') or [])[:20] if coding_data.get('ok') else [],
+        'commands': (coding_data.get('commands') or [])[-12:] if coding_data.get('ok') else [],
+        'tests': (coding_data.get('tests') or [])[-12:] if coding_data.get('ok') else [],
+        'outputs': (coding_data.get('outputs') or []) if coding_data.get('ok') else [],
+    }
+
+
 # 状态推进顺序（手动推进用）
 _STATE_FLOW = {
     'Pending':  ('Taizi', '皇上', '太子', '待处理旨意转交太子分拣'),
@@ -9479,6 +9872,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({'ok': False, 'error': 'task_id required'}, 400)
             else:
                 self.send_json(get_scheduler_state(task_id))
+        elif p.startswith('/api/task-evidence/'):
+            task_id = p.replace('/api/task-evidence/', '')
+            if not task_id or not _SAFE_NAME_RE.match(task_id):
+                self.send_json({'ok': False, 'error': 'invalid task_id'}, 400)
+            else:
+                result = get_task_evidence(task_id)
+                self.send_json(result, 200 if result.get('ok') else 404)
         elif p == '/api/runtime-outbox':
             try:
                 limit = int((qs.get('limit') or ['8'])[0])

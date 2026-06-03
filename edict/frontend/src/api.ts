@@ -77,6 +77,8 @@ export const api = {
     fetchJ<CodingSessionData>(`${API_BASE}/api/coding-session/${encodeURIComponent(id)}`),
   schedulerState: (id: string) =>
     fetchJ<SchedulerStateData>(`${API_BASE}/api/scheduler-state/${encodeURIComponent(id)}`),
+  taskEvidence: (id: string) =>
+    fetchJ<TaskEvidenceData>(`${API_BASE}/api/task-evidence/${encodeURIComponent(id)}`),
 
   // 技能内容
   skillContent: (agentId: string, skillName: string) =>
@@ -1071,6 +1073,80 @@ export interface SchedulerStateData {
     actionReason?: string;
     retryable?: boolean;
   };
+}
+
+export interface EvidenceHealth {
+  status: 'ok' | 'warn' | 'err' | 'idle' | string;
+  label: string;
+  detail?: string;
+  nextAction?: string;
+  confidence?: string;
+}
+
+export interface EvidenceSummary {
+  eventCount: number;
+  sessionCount: number;
+  outboxTotal: number;
+  outboxPending: number;
+  outboxRunning: number;
+  outboxFailed: number;
+  fileCount: number;
+  commandCount: number;
+  testCount: number;
+  outputCount: number;
+  modelCount: number;
+  modelFailures: number;
+  modelTimeouts: number;
+  missingLayerCount: number;
+}
+
+export interface EvidenceTimelineItem {
+  lane: 'state' | 'dispatch' | 'session' | 'tool' | 'file' | 'test' | 'model' | 'governance' | 'event' | string;
+  title: string;
+  detail?: string;
+  status: 'ok' | 'warn' | 'err' | 'idle' | string;
+  at?: string;
+  source?: string;
+  agentId?: string;
+  traceId?: string;
+  sessionId?: string;
+  messageId?: string;
+  dispatchId?: string;
+  evidence?: Record<string, unknown>;
+}
+
+export interface EvidenceSession {
+  sessionId: string;
+  traceId?: string;
+  agentId?: string;
+  runtime?: string;
+  dispatchId?: string;
+  trigger?: string;
+  state?: string;
+  boundAt?: string;
+  status?: string;
+}
+
+export interface TaskEvidenceData {
+  ok: boolean;
+  error?: string;
+  taskId: string;
+  traceId?: string;
+  generatedAt?: string;
+  task?: { title?: string; state?: string; org?: string; updatedAt?: string; stageLabel?: string };
+  health?: EvidenceHealth;
+  summary?: EvidenceSummary;
+  sessions?: EvidenceSession[];
+  outbox?: RuntimeOutboxItem[];
+  models?: ModelHealthAgent[];
+  timeline?: EvidenceTimelineItem[];
+  missingLayers?: string[];
+  traceSummary?: TraceSummary;
+  stateEvidence?: StateEvidence;
+  files?: CodingFileRef[];
+  commands?: CodingEvent[];
+  tests?: CodingEvent[];
+  outputs?: CodingEvent[];
 }
 
 export interface SkillContentResult {
