@@ -1309,6 +1309,9 @@ def test_preview_run_spec_includes_tool_policy(tmp_path, monkeypatch):
     assert run['toolPolicy']['requiresApproval'] is True
     assert run['policyGate']['decision'] == 'hold_for_policy'
     assert run['policyGate']['status'] == 'waiting_policy_approval'
+    assert run['executionIsolation']['mode'] == 'patch_first_shared_worktree'
+    assert run['executionIsolation']['targetMode'] == 'dedicated_worktree'
+    assert run['executionIsolation']['requiresPatchReview'] is True
     assert any(item['id'] == 'shell.command' for item in run['capabilityPolicies'])
 
 
@@ -1345,10 +1348,12 @@ def test_create_run_spec_creates_task_and_persists_mapping(tmp_path, monkeypatch
     assert tasks[0]['templateId'] == 'agent-control-plane'
     assert tasks[0]['templateParams']['runId'] == result['run']['id']
     assert tasks[0]['runSpecId'] == result['run']['id']
+    assert tasks[0]['runSpec']['executionIsolation']['requiresPatchReview'] is True
 
     specs = json.loads(data.joinpath('run_specs.json').read_text(encoding='utf-8'))
     assert specs[0]['taskId'] == result['taskId']
     assert specs[0]['deliverable'] == '补丁和验证结果'
+    assert specs[0]['executionIsolation']['mode'] == 'patch_first_shared_worktree'
 
 
 def test_auto_run_spec_infers_plan_and_holds_for_review_without_dispatch(tmp_path, monkeypatch):

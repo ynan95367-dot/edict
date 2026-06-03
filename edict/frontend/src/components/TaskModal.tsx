@@ -32,6 +32,7 @@ import type {
   PatchReview,
   SourceFileResult,
   WorktreeCheckpoint,
+  ExecutionIsolation,
   OutputGroup,
 } from '../api';
 
@@ -831,6 +832,29 @@ function CheckpointStrip({ checkpoint }: { checkpoint?: WorktreeCheckpoint }) {
   );
 }
 
+function IsolationStrip({ isolation }: { isolation?: ExecutionIsolation }) {
+  if (!isolation?.mode) return null;
+  const required = !!isolation.required;
+  const parts = [
+    isolation.patchFirst ? 'Patch-first' : '',
+    isolation.requiresPatchReview ? '需要审批' : '',
+    isolation.checkpoint ? `Checkpoint ${isolation.checkpoint}` : '',
+    isolation.rollback ? `Rollback ${isolation.rollback}` : '',
+  ].filter(Boolean);
+  return (
+    <div className={`isolation-strip ${required ? 'required' : 'optional'}`}>
+      <span>Isolation</span>
+      <b>{isolation.label || isolation.mode}</b>
+      <em>{isolation.reason || '执行隔离策略已随 RunSpec 生成'}</em>
+      {!!parts.length && (
+        <div className="isolation-tags">
+          {parts.map((item) => <span key={item}>{item}</span>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CodingSessionSection({
   data,
   onOpenSource,
@@ -872,6 +896,7 @@ function CodingSessionSection({
         <div className="cockpit-cell"><span>事件</span><b>{s.eventCount}</b></div>
       </div>
 
+      <IsolationStrip isolation={data.executionIsolation} />
       <CheckpointStrip checkpoint={data.checkpoint} />
 
       <PatchReviewPanel data={data} onCreatePatch={onCreatePatch} onDecidePatch={onDecidePatch} />

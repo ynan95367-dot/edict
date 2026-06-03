@@ -210,6 +210,20 @@ def test_dispatch_uses_opencode_run_attach(monkeypatch, tmp_path):
         'state': 'Taizi',
         'org': '太子',
         'updatedAt': '2026-05-26T16:00:00Z',
+        'runSpec': {
+            'executionIsolation': {
+                'mode': 'patch_first_shared_worktree',
+                'targetMode': 'dedicated_worktree',
+                'label': 'Patch-first 隔离',
+                'required': True,
+                'patchFirst': True,
+                'requiresPatchReview': True,
+                'checkpoint': 'before_dispatch',
+                'rollback': 'reverse_patch_or_checkpoint',
+                'reason': '测试隔离约束',
+                'guardrails': ['审批前禁止 commit、push'],
+            },
+        },
     }
     tasks_path = data_dir / 'tasks_source.json'
     tasks_path.write_text(json.dumps([task], ensure_ascii=False), encoding='utf-8')
@@ -264,6 +278,11 @@ def test_dispatch_uses_opencode_run_attach(monkeypatch, tmp_path):
     assert captured['envs'][0]['EDICT_TASK_ID'] == task_id
     assert captured['envs'][0]['EDICT_TRACE_ID'].startswith('trc_')
     assert captured['envs'][0]['EDICT_AGENT_ID'] == 'taizi'
+    assert captured['envs'][0]['EDICT_ISOLATION_MODE'] == 'patch_first_shared_worktree'
+    assert captured['envs'][0]['EDICT_PATCH_FIRST'] == '1'
+    assert captured['envs'][0]['EDICT_PATCH_REVIEW_REQUIRED'] == '1'
+    assert 'Patch-first 隔离' in opencode_cmd[-1]
+    assert '审批前禁止 commit、push' in opencode_cmd[-1]
 
     updated = json.loads(tasks_path.read_text(encoding='utf-8'))[0]
     sched = updated['_scheduler']

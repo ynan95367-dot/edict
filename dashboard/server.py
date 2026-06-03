@@ -2181,6 +2181,119 @@ def _policy_gate_for_run(mode, risk_level, tool_policy):
     }
 
 
+def _execution_isolation_for_run(capability_ids, risk_level, run_kind, mode):
+    """Describe how a run should be isolated before the real worktree allocator exists."""
+    cap_set = set(capability_ids or [])
+    code_or_command = bool({'code.workspace', 'shell.command'} & cap_set)
+    file_or_document = bool({'file.workspace', 'document.office'} & cap_set)
+
+    if mode == 'plan':
+        return {
+            'mode': 'read_only_plan',
+            'targetMode': 'read_only_plan',
+            'status': 'not_required',
+            'label': '只读方案',
+            'required': False,
+            'patchFirst': False,
+            'requiresPatchReview': False,
+            'checkpoint': 'not_required',
+            'rollback': 'not_required',
+            'reason': '方案模式不直接修改工作区',
+            'guardrails': ['只形成 RunSpec、风险边界和执行建议', '不写入代码或产物文件'],
+        }
+
+    if code_or_command:
+        return {
+            'mode': 'patch_first_shared_worktree',
+            'targetMode': 'dedicated_worktree',
+            'status': 'required',
+            'label': 'Patch-first 隔离',
+            'required': True,
+            'patchFirst': True,
+            'requiresPatchReview': True,
+            'checkpoint': 'before_dispatch',
+            'rollback': 'reverse_patch_or_checkpoint',
+            'reason': '代码或命令任务必须先形成可审议 patch，审批前不得提交或推送',
+            'guardrails': [
+                '执行前记录 git HEAD 和工作区状态',
+                '修改只以工作区 diff/patch 形式收口',
+                '审批前禁止 commit、push、merge、reset --hard',
+                '驳回时通过反向 patch 或 checkpoint 回滚',
+            ],
+        }
+
+    if file_or_document or risk_level in {'medium', 'high'}:
+        return {
+            'mode': 'checkpoint_shared_worktree',
+            'targetMode': 'shared_worktree',
+            'status': 'recommended',
+            'label': 'Checkpoint 隔离',
+            'required': False,
+            'patchFirst': False,
+            'requiresPatchReview': False,
+            'checkpoint': 'before_dispatch',
+            'rollback': 'checkpoint_or_artifact_restore',
+            'reason': '文件或文档任务需要保留执行前状态和产物证据',
+            'guardrails': ['执行前记录工作区状态', '生成产物需按任务归档', '敏感覆盖动作需先确认'],
+        }
+
+    return {
+        'mode': 'shared_readmostly',
+        'targetMode': 'shared_readmostly',
+        'status': 'optional',
+        'label': '共享只读',
+        'required': False,
+        'patchFirst': False,
+        'requiresPatchReview': False,
+        'checkpoint': 'optional',
+        'rollback': 'not_required',
+        'reason': '低风险信息整理任务默认不需要独立工作区',
+        'guardrails': ['保留关键证据和输出摘要'],
+    }
+
+
+def _task_execution_isolation(task):
+    task = task or {}
+    run_spec = task.get('runSpec') if isinstance(task.get('runSpec'), dict) else {}
+    params = task.get('templateParams') if isinstance(task.get('templateParams'), dict) else {}
+    for source in (run_spec, params):
+        isolation = source.get('executionIsolation') if isinstance(source, dict) else None
+        if isinstance(isolation, dict) and isolation.get('mode'):
+            return isolation
+    capability_ids = (
+        run_spec.get('requiredCapabilities')
+        or params.get('requiredCapabilities')
+        or []
+    )
+    if not isinstance(capability_ids, list):
+        capability_ids = []
+    return _execution_isolation_for_run(
+        [str(item) for item in capability_ids],
+        str(run_spec.get('riskLevel') or params.get('riskLevel') or 'low'),
+        str(params.get('runKind') or ''),
+        str(run_spec.get('mode') or params.get('mode') or 'execute'),
+    )
+
+
+def _dispatch_isolation_instructions(isolation):
+    if not isinstance(isolation, dict) or not isolation.get('mode'):
+        return ''
+    guardrails = isolation.get('guardrails') if isinstance(isolation.get('guardrails'), list) else []
+    guardrail_text = ''.join(f'\n- {item}' for item in guardrails[:5])
+    return (
+        f'\n\n🔒 执行隔离要求\n'
+        f'模式: {isolation.get("label", isolation.get("mode", ""))} '
+        f'({isolation.get("mode", "")} → 目标 {isolation.get("targetMode", "")})\n'
+        f'原因: {isolation.get("reason", "")}\n'
+        f'Patch-first: {"是" if isolation.get("patchFirst") else "否"}；'
+        f'Patch 审批: {"需要" if isolation.get("requiresPatchReview") else "按需"}；'
+        f'Checkpoint: {isolation.get("checkpoint", "")}；'
+        f'Rollback: {isolation.get("rollback", "")}'
+        f'{guardrail_text}\n'
+        f'如需修改文件，必须在进展中写明变更路径，便于看板生成 Patch 审批。'
+    )
+
+
 def _infer_required_capabilities(goal, explicit_ids=None):
     enabled = _enabled_capability_ids()
     explicit = [item for item in (explicit_ids or []) if item in enabled]
@@ -2514,6 +2627,7 @@ def _prepare_run_spec(payload, run_id='RUN-PREVIEW', task_id='', created_at='', 
     capability_policies = _capability_policies_for_run(capability_ids)
     tool_policy = _tool_policy_for_run(capability_ids, risk_level, mode, capability_policies)
     policy_gate = _policy_gate_for_run(mode, risk_level, tool_policy)
+    execution_isolation = _execution_isolation_for_run(capability_ids, risk_level, run_kind, mode)
     profile = {
         'deliverable': {'value': deliverable, 'source': 'user' if deliverable_input else 'inferred'},
         'constraints': {'value': constraints, 'source': 'user' if constraints_input else 'inferred'},
@@ -2549,6 +2663,7 @@ def _prepare_run_spec(payload, run_id='RUN-PREVIEW', task_id='', created_at='', 
         'capabilityPolicies': capability_policies,
         'toolPolicy': tool_policy,
         'policyGate': policy_gate,
+        'executionIsolation': execution_isolation,
         'riskLevel': risk_level,
         'governance': governance,
         'constraints': constraints,
@@ -2585,6 +2700,7 @@ def create_run_spec(payload):
     profile = run.get('profile') or {}
     tool_policy = run.get('toolPolicy') or {}
     policy_gate = run.get('policyGate') or _policy_gate_for_run(mode, risk_level, tool_policy)
+    execution_isolation = run.get('executionIsolation') or _execution_isolation_for_run(capability_ids, risk_level, run_kind, mode)
     dispatch_policy = policy_gate.get('decision') or 'auto_dispatch'
     hold_for_gate = dispatch_policy != 'auto_dispatch'
 
@@ -2603,6 +2719,7 @@ def create_run_spec(payload):
         'governance': governance,
         'toolPolicy': tool_policy,
         'policyGate': policy_gate,
+        'executionIsolation': execution_isolation,
         'runKind': run_kind,
         'source': 'command_center',
     }
@@ -2683,6 +2800,7 @@ def create_run_spec(payload):
             'governance': governance,
             'toolPolicy': tool_policy,
             'policyGate': policy_gate,
+            'executionIsolation': execution_isolation,
         }
         meta = task.setdefault('sourceMeta', {})
         if isinstance(meta, dict):
@@ -2704,6 +2822,7 @@ def create_run_spec(payload):
                 'requiredCapabilities': capability_ids,
                 'toolPolicy': tool_policy,
                 'policyGate': policy_gate,
+                'executionIsolation': execution_isolation,
                 'dispatchPolicy': dispatch_policy,
             },
             evidence={'source': 'command_center'},
@@ -5924,6 +6043,7 @@ def get_task_coding_session(task_id):
         files[path]['latestAt'] = max(files[path]['latestAt'], event.get('at', ''))
 
     checkpoint = get_worktree_checkpoint()
+    execution_isolation = _task_execution_isolation(task)
     patch_reviews = [_patch_review_public(item) for item in list_patch_reviews(task_id)]
     patch_counts = {}
     for review in patch_reviews:
@@ -5963,6 +6083,7 @@ def get_task_coding_session(task_id):
         'tests': tests[-20:],
         'outputs': outputs,
         'events': events[-120:],
+        'executionIsolation': execution_isolation,
         'patchReviews': patch_reviews[-20:],
         'checkpoint': checkpoint,
         'missingLayers': [item for item in (
@@ -6314,6 +6435,8 @@ def _build_dispatch_payload(task_id, task, new_state, agent_id, trigger):
     title = task.get('title', '(无标题)')
     target_dept = task.get('targetDept', '')
     trace_id = _ensure_trace_id(task)
+    execution_isolation = _task_execution_isolation(task)
+    isolation_text = _dispatch_isolation_instructions(execution_isolation)
     msgs = {
         'taizi': (
             f'📜 皇上旨意需要你处理\n'
@@ -6328,6 +6451,7 @@ def _build_dispatch_payload(task_id, task, new_state, agent_id, trigger):
             f'2) python3 scripts/kanban_update.py state {task_id} Zhongshu "太子已分拣，转中书省起草"\n'
             f'3) python3 scripts/kanban_update.py flow {task_id} "太子" "中书省" "📋 旨意传达：请中书省起草执行方案"\n'
             f'4) 调用 zhongshu subagent 起草方案。'
+            f'{isolation_text}'
         ),
         'zhongshu': (
             f'📜 旨意已到中书省，请起草方案\n'
@@ -6337,6 +6461,7 @@ def _build_dispatch_payload(task_id, task, new_state, agent_id, trigger):
             f'⚠️ 看板已有此任务记录，请勿重复创建。直接用 kanban_update.py state 更新状态。\n'
             f'如需任务详情，先执行：python3 scripts/kanban_update.py show {task_id}；不要猜测单任务 JSON 路径。\n'
             f'请立即起草执行方案，走完完整三省流程（中书起草→门下审议→尚书派发→六部执行）。'
+            f'{isolation_text}'
         ),
         'menxia': (
             f'📋 中书省方案提交审议\n'
@@ -6346,6 +6471,7 @@ def _build_dispatch_payload(task_id, task, new_state, agent_id, trigger):
             f'⚠️ 看板已有此任务，请勿重复创建。\n'
             f'如需任务详情，先执行：python3 scripts/kanban_update.py show {task_id}；不要猜测单任务 JSON 路径。\n'
             f'请审议中书省方案，给出准奏或封驳意见。'
+            f'{isolation_text}'
         ),
         'shangshu': (
             f'📮 门下省已准奏，请派发执行\n'
@@ -6359,6 +6485,7 @@ def _build_dispatch_payload(task_id, task, new_state, agent_id, trigger):
             f'然后执行：python3 scripts/kanban_update.py state {task_id} Doing "尚书省派发任务给六部"\n'
             f'再执行：python3 scripts/kanban_update.py flow {task_id} "尚书省" "六部" "📮 尚书省派发六部执行"\n'
             f'最后调用需要的六部 subagent 执行并汇总。'
+            f'{isolation_text}'
         ),
     }
     message = msgs.get(agent_id, (
@@ -6371,12 +6498,14 @@ def _build_dispatch_payload(task_id, task, new_state, agent_id, trigger):
         f'目标仓库若是外部目录，请用 bash 的 ls/find/rg/sed 查看；不要用 read 工具直接读取目录路径。\n'
         f'如果任务当前已经是 Doing，不要再执行 state {task_id} Doing；请直接 progress/flow/todo。\n'
         f'本次派发必须有明确收口：完成就先把相关 todo 标为 completed，再执行 done；不能完成就执行 block 并写明阻塞原因。'
+        f'{isolation_text}'
     ))
     return {
         'message': message,
         'title': title,
         'targetDept': target_dept,
         'traceId': trace_id,
+        'executionIsolation': execution_isolation,
     }
 
 
@@ -6468,7 +6597,9 @@ def _execute_dispatch_outbox_item(item):
     task_trace_id = _ensure_trace_id(task)
     trace_id = trace_id or task_trace_id or task_id
     title = payload.get('title') or task.get('title', '(无标题)')
-    msg = payload.get('message') or _build_dispatch_payload(task_id, task, new_state, agent_id, trigger)['message']
+    dispatch_payload = _build_dispatch_payload(task_id, task, new_state, agent_id, trigger)
+    msg = payload.get('message') or dispatch_payload['message']
+    execution_isolation = payload.get('executionIsolation') or dispatch_payload.get('executionIsolation') or _task_execution_isolation(task)
     runtime = _agent_runtime()
     runtime_label = _runtime_label()
     dispatch_env = os.environ.copy()
@@ -6478,6 +6609,12 @@ def _execute_dispatch_outbox_item(item):
         'EDICT_DISPATCH_ID': dispatch_id,
         'EDICT_AGENT_ID': agent_id,
         'EDICT_DISPATCH_STATE': new_state,
+        'EDICT_ISOLATION_MODE': str(execution_isolation.get('mode', '')),
+        'EDICT_ISOLATION_TARGET_MODE': str(execution_isolation.get('targetMode', '')),
+        'EDICT_ISOLATION_REQUIRED': '1' if execution_isolation.get('required') else '0',
+        'EDICT_PATCH_FIRST': '1' if execution_isolation.get('patchFirst') else '0',
+        'EDICT_PATCH_REVIEW_REQUIRED': '1' if execution_isolation.get('requiresPatchReview') else '0',
+        'EDICT_ROLLBACK_POLICY': str(execution_isolation.get('rollback', '')),
     })
 
     def _update_if_current(status, error='', session_id='', flow_remark=''):
@@ -6661,6 +6798,7 @@ def _execute_dispatch_outbox_item(item):
                 'status': 'started',
                 'attempt': attempt,
                 'dispatchId': dispatch_id,
+                'executionIsolation': execution_isolation,
                 'remark': f'开始派发: {agent_id} (第{attempt}次)',
             }, trace_id=trace_id)
             result = _run_capture_timeout(cmd, timeout=310, env=dispatch_env)

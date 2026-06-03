@@ -213,6 +213,20 @@ export interface PolicyGate {
   permissionLabels?: string[];
 }
 
+export interface ExecutionIsolation {
+  mode: string;
+  targetMode?: string;
+  status?: 'required' | 'recommended' | 'optional' | 'not_required' | string;
+  label?: string;
+  required?: boolean;
+  patchFirst?: boolean;
+  requiresPatchReview?: boolean;
+  checkpoint?: string;
+  rollback?: string;
+  reason?: string;
+  guardrails?: string[];
+}
+
 export interface CapabilitiesResult {
   ok: boolean;
   generatedAt: string;
@@ -249,6 +263,7 @@ export interface RunSpec {
   capabilityPolicies?: CapabilityPolicy[];
   toolPolicy?: ToolPolicy;
   policyGate?: PolicyGate;
+  executionIsolation?: ExecutionIsolation;
   riskLevel: 'low' | 'medium' | 'high' | string;
   governance: GovernanceStage[];
   constraints?: string;
@@ -742,6 +757,7 @@ export interface CodingSessionData {
   tests: CodingEvent[];
   outputs: CodingEvent[];
   events: CodingEvent[];
+  executionIsolation?: ExecutionIsolation;
   patchReviews?: PatchReview[];
   checkpoint?: WorktreeCheckpoint;
   missingLayers: string[];

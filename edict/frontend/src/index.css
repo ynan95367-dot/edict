@@ -613,6 +613,13 @@ textarea:focus-visible {
 .checkpoint-strip em { font-size: 10px; color: var(--muted); font-style: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .checkpoint-files { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }
 .checkpoint-files span { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid var(--line); border-radius: 999px; padding: 2px 7px; font-size: 10px; color: var(--muted); background: rgba(6,9,16,.65); }
+.isolation-strip { display: grid; grid-template-columns: 78px minmax(0, .8fr) minmax(0, 1.2fr); gap: 8px; align-items: center; border: 1px solid rgba(89,208,194,.28); border-radius: 8px; background: rgba(18,42,39,.28); padding: 9px 10px; margin-bottom: 12px; min-width: 0; }
+.isolation-strip.required { border-color: rgba(217,174,95,.44); background: rgba(33,29,23,.74); }
+.isolation-strip > span { font-size: 10px; font-weight: 800; color: var(--muted); text-transform: uppercase; }
+.isolation-strip b { font-size: 11px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.isolation-strip em { font-size: 10px; color: var(--muted); font-style: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.isolation-tags { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }
+.isolation-tags span { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid rgba(89,208,194,.28); border-radius: 999px; padding: 2px 7px; font-size: 10px; color: var(--jade); background: rgba(89,208,194,.08); }
 .patch-panel { border: 1px solid rgba(217,174,95,.24); border-radius: 8px; background: rgba(16,15,13,.68); margin-bottom: 12px; overflow: hidden; }
 .patch-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 10px 11px; border-bottom: 1px solid var(--line); }
 .patch-title { display: inline-flex; align-items: center; gap: 6px; color: var(--gold); font-size: 12px; font-weight: 850; }
@@ -681,6 +688,7 @@ textarea:focus-visible {
 @media (max-width: 760px) {
   .cockpit-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .checkpoint-strip { grid-template-columns: 1fr; }
+  .isolation-strip { grid-template-columns: 1fr; }
   .checkpoint-files { grid-column: 1; }
   .patch-head, .patch-row { grid-template-columns: 1fr; }
   .patch-actions { justify-content: flex-start; }

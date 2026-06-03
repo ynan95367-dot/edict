@@ -225,6 +225,13 @@ export default function CommandCenter() {
     : Array.from(new Set(capabilityPolicies.flatMap((item) => permissionLabels(item))));
   const unavailableCaps = previewRun?.toolPolicy?.unavailableCapabilities || [];
   const unknownCaps = previewRun?.toolPolicy?.unknownCapabilities || [];
+  const executionIsolation = previewRun?.executionIsolation;
+  const isolationTags = executionIsolation ? [
+    executionIsolation.patchFirst ? 'Patch-first' : '按需 Patch',
+    executionIsolation.requiresPatchReview ? '需要 Patch 审批' : '审批按需',
+    executionIsolation.checkpoint ? `Checkpoint ${executionIsolation.checkpoint}` : '',
+    executionIsolation.rollback ? `Rollback ${executionIsolation.rollback}` : '',
+  ].filter(Boolean) : [];
   const clarification = previewRun?.clarification || previewRun?.profile?.clarification;
   const intentReason = previewLoading
     ? '正在识别目标...'
@@ -595,6 +602,26 @@ export default function CommandCenter() {
           {!!unknownCaps.length && !unavailableCaps.length && (
             <div className="cmd-policy-note muted">
               任务中确认：{unknownCaps.map((item) => item.name || item.id).join('、')}
+            </div>
+          )}
+        </div>
+
+        <div className="cmd-preview-block">
+          <div className="cmd-block-title">执行隔离</div>
+          <div className="cmd-policy-head">
+            <span className={`cmd-policy-state ${executionIsolation?.required ? 'review' : 'auto'}`}>
+              {executionIsolation?.label || '等待目标'}
+            </span>
+            <small>{executionIsolation?.reason || '等待目标后自动生成隔离策略'}</small>
+          </div>
+          <div className="cmd-policy-tags">
+            {isolationTags.length ? isolationTags.map((item) => (
+              <span key={item}>{item}</span>
+            )) : <em>等待目标</em>}
+          </div>
+          {executionIsolation?.targetMode && executionIsolation.targetMode !== executionIsolation.mode && (
+            <div className="cmd-policy-note muted">
+              目标模式：{executionIsolation.targetMode}；当前约束：{executionIsolation.mode}
             </div>
           )}
         </div>
