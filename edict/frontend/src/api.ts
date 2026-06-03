@@ -741,6 +741,9 @@ export interface PatchReview {
   decisionReason?: string;
   lastError?: string;
   baseHead?: string;
+  worktreePath?: string;
+  worktreeBranch?: string;
+  projectRoot?: string;
   diffPreview: string;
   diffSize: number;
 }

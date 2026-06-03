@@ -401,6 +401,37 @@ def _safe_source_path(path_value: str, allow_missing=False):
     return candidate
 
 
+def _safe_source_path_in_root(path_value: str, root=None, allow_missing=False):
+    raw = (path_value or '').strip()
+    if not raw or '\x00' in raw:
+        return None
+    try:
+        base = pathlib.Path(root or PROJECT_ROOT).resolve()
+        path = pathlib.Path(raw).expanduser()
+        if not path.is_absolute():
+            path = base / raw.lstrip('/').replace('\\', '/')
+        candidate = path.resolve()
+    except Exception:
+        return None
+    if not _is_within(candidate, base):
+        return None
+    if set(candidate.parts).intersection({'.git', 'node_modules', '__pycache__'}):
+        return None
+    if candidate.suffix.lower() not in _SOURCE_EXTS:
+        return None
+    if candidate.exists():
+        if not candidate.is_file():
+            return None
+        try:
+            if candidate.stat().st_size > _MAX_SOURCE_FILE_BYTES:
+                return None
+        except OSError:
+            return None
+    elif not allow_missing:
+        return None
+    return candidate
+
+
 def _safe_source_file(path_value: str):
     return _safe_source_path(path_value, allow_missing=False)
 
@@ -408,6 +439,13 @@ def _safe_source_file(path_value: str):
 def _rel_project_path(path: pathlib.Path) -> str:
     try:
         return path.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+    except Exception:
+        return str(path)
+
+
+def _rel_repo_path(path: pathlib.Path, root=None) -> str:
+    try:
+        return path.resolve().relative_to(pathlib.Path(root or PROJECT_ROOT).resolve()).as_posix()
     except Exception:
         return str(path)
 
@@ -489,11 +527,11 @@ def open_source_file(path_value: str, start_line=0):
     }
 
 
-def _git_run(args, timeout=5):
+def _git_run(args, timeout=5, cwd=None):
     try:
         return subprocess.run(
             ['git', *args],
-            cwd=str(PROJECT_ROOT),
+            cwd=str(cwd or PROJECT_ROOT),
             text=True,
             capture_output=True,
             timeout=timeout,
@@ -502,14 +540,15 @@ def _git_run(args, timeout=5):
         return None
 
 
-def get_worktree_checkpoint(limit=40):
-    root_check = _git_run(['rev-parse', '--show-toplevel'])
+def get_worktree_checkpoint(limit=40, root=None):
+    cwd = pathlib.Path(root or PROJECT_ROOT)
+    root_check = _git_run(['rev-parse', '--show-toplevel'], cwd=cwd)
     if not root_check or root_check.returncode != 0:
         return {'ok': False, 'available': False, 'error': 'git worktree not available'}
-    branch = _git_run(['rev-parse', '--abbrev-ref', 'HEAD'])
-    head = _git_run(['rev-parse', '--short', 'HEAD'])
-    status = _git_run(['status', '--porcelain=v1', '-uno'])
-    untracked = _git_run(['ls-files', '--others', '--exclude-standard'])
+    branch = _git_run(['rev-parse', '--abbrev-ref', 'HEAD'], cwd=cwd)
+    head = _git_run(['rev-parse', '--short', 'HEAD'], cwd=cwd)
+    status = _git_run(['status', '--porcelain=v1', '-uno'], cwd=cwd)
+    untracked = _git_run(['ls-files', '--others', '--exclude-standard'], cwd=cwd)
     files = []
     staged = unstaged = 0
     if status and status.returncode == 0:
@@ -586,21 +625,24 @@ def _patch_review_public(item):
         'decisionReason': item.get('decisionReason', ''),
         'lastError': item.get('lastError', ''),
         'baseHead': item.get('baseHead', ''),
+        'worktreePath': item.get('worktreePath', ''),
+        'worktreeBranch': item.get('worktreeBranch', ''),
+        'projectRoot': item.get('projectRoot', ''),
         'diffPreview': diff[:12000],
         'diffSize': len(diff),
     }
 
 
-def _normalize_patch_paths(paths):
+def _normalize_patch_paths(paths, root=None):
     out = []
     seen = set()
     for raw in paths or []:
         if not isinstance(raw, str):
             continue
-        source = _safe_source_path(raw, allow_missing=True)
+        source = _safe_source_path_in_root(raw, root=root, allow_missing=True)
         if not source:
             continue
-        rel = _rel_project_path(source)
+        rel = _rel_repo_path(source, root=root)
         if rel in seen:
             continue
         seen.add(rel)
@@ -608,7 +650,7 @@ def _normalize_patch_paths(paths):
     return out
 
 
-def _task_file_change_paths(task_id):
+def _task_file_change_paths(task_id, root=None):
     paths = []
     try:
         activity = (get_task_activity(task_id) or {}).get('activity') or []
@@ -625,7 +667,7 @@ def _task_file_change_paths(task_id):
             path = _file_path_from_payload(payload)
             if path:
                 paths.append(path)
-    return _normalize_patch_paths(paths)
+    return _normalize_patch_paths(paths, root=root)
 
 
 _SOURCE_PATH_RE = re.compile(
@@ -667,8 +709,8 @@ def _task_text_candidates(task, activity):
     return values
 
 
-def _git_changed_source_paths():
-    status = _git_run(['status', '--porcelain=v1', '--untracked-files=all'], timeout=10)
+def _git_changed_source_paths(root=None):
+    status = _git_run(['status', '--porcelain=v1', '--untracked-files=all'], timeout=10, cwd=root)
     if not status or status.returncode != 0:
         return []
     paths = []
@@ -681,18 +723,18 @@ def _git_changed_source_paths():
             raw = raw.split(' -> ', 1)[1].strip()
         if raw.startswith('"') and raw.endswith('"'):
             continue
-        for rel in _normalize_patch_paths([raw]):
+        for rel in _normalize_patch_paths([raw], root=root):
             if rel in seen:
                 continue
-            if not (_git_path_is_tracked(rel) or (_safe_source_file(rel) and _git_path_is_untracked(rel))):
+            if not (_git_path_is_tracked(rel, root=root) or (_safe_source_path_in_root(rel, root=root) and _git_path_is_untracked(rel, root=root))):
                 continue
             seen.add(rel)
             paths.append(rel)
     return paths
 
 
-def _task_mentioned_patch_paths(task, activity=None):
-    changed = set(_git_changed_source_paths())
+def _task_mentioned_patch_paths(task, activity=None, root=None):
+    changed = set(_git_changed_source_paths(root=root))
     if not changed:
         return []
     out = []
@@ -700,7 +742,7 @@ def _task_mentioned_patch_paths(task, activity=None):
     for value in _task_text_candidates(task, activity or []):
         raw_paths = [value] if isinstance(value, str) and pathlib.Path(value).suffix else []
         raw_paths.extend(_extract_source_paths_from_text(value))
-        for rel in _normalize_patch_paths(raw_paths):
+        for rel in _normalize_patch_paths(raw_paths, root=root):
             if rel not in changed or rel in seen:
                 continue
             seen.add(rel)
@@ -708,13 +750,13 @@ def _task_mentioned_patch_paths(task, activity=None):
     return out
 
 
-def _git_path_is_tracked(rel_path):
-    result = _git_run(['ls-files', '--error-unmatch', '--', rel_path], timeout=5)
+def _git_path_is_tracked(rel_path, root=None):
+    result = _git_run(['ls-files', '--error-unmatch', '--', rel_path], timeout=5, cwd=root)
     return bool(result and result.returncode == 0)
 
 
-def _git_path_is_untracked(rel_path):
-    result = _git_run(['ls-files', '--others', '--exclude-standard', '--', rel_path], timeout=5)
+def _git_path_is_untracked(rel_path, root=None):
+    result = _git_run(['ls-files', '--others', '--exclude-standard', '--', rel_path], timeout=5, cwd=root)
     if not result or result.returncode != 0:
         return False
     return any(line.strip() == rel_path for line in result.stdout.splitlines())
@@ -750,8 +792,8 @@ def _patch_status_from_git(code):
     return 'modified'
 
 
-def _git_diff_status_map(paths):
-    result = _git_run(['diff', '--name-status', 'HEAD', '--', *paths], timeout=10)
+def _git_diff_status_map(paths, root=None):
+    result = _git_run(['diff', '--name-status', 'HEAD', '--', *paths], timeout=10, cwd=root)
     out = {}
     if not result or result.returncode != 0:
         return out
@@ -763,15 +805,15 @@ def _git_diff_status_map(paths):
     return out
 
 
-def _git_diff_for_paths(paths):
+def _git_diff_for_paths(paths, root=None):
     if not paths:
         return '', {}
     tracked_paths = []
     untracked_paths = []
     for rel in paths:
-        if _git_path_is_tracked(rel):
+        if _git_path_is_tracked(rel, root=root):
             tracked_paths.append(rel)
-        elif _safe_source_file(rel) and _git_path_is_untracked(rel):
+        elif _safe_source_path_in_root(rel, root=root) and _git_path_is_untracked(rel, root=root):
             untracked_paths.append(rel)
 
     diff_parts = []
@@ -779,27 +821,27 @@ def _git_diff_for_paths(paths):
     insertions = deletions = 0
 
     if tracked_paths:
-        diff = _git_run(['diff', '--binary', 'HEAD', '--', *tracked_paths], timeout=10)
+        diff = _git_run(['diff', '--binary', 'HEAD', '--', *tracked_paths], timeout=10, cwd=root)
         if not diff or diff.returncode != 0:
             err = diff.stderr.strip() if diff else 'git diff failed'
             raise RuntimeError(err or 'git diff failed')
         if diff.stdout:
             diff_parts.append(diff.stdout)
-        stat = _git_run(['diff', '--numstat', 'HEAD', '--', *tracked_paths], timeout=10)
+        stat = _git_run(['diff', '--numstat', 'HEAD', '--', *tracked_paths], timeout=10, cwd=root)
         if stat and stat.returncode == 0:
-            parsed, add, dele = _parse_patch_numstat(stat.stdout, _git_diff_status_map(tracked_paths))
+            parsed, add, dele = _parse_patch_numstat(stat.stdout, _git_diff_status_map(tracked_paths, root=root))
             files.extend(parsed)
             insertions += add
             deletions += dele
 
     for rel in untracked_paths:
-        diff = _git_run(['diff', '--binary', '--no-index', '--', '/dev/null', rel], timeout=10)
+        diff = _git_run(['diff', '--binary', '--no-index', '--', '/dev/null', rel], timeout=10, cwd=root)
         if not diff or diff.returncode not in (0, 1):
             err = diff.stderr.strip() if diff else 'git diff failed'
             raise RuntimeError(err or f'git diff failed for {rel}')
         if diff.stdout:
             diff_parts.append(diff.stdout)
-        stat = _git_run(['diff', '--numstat', '--no-index', '--', '/dev/null', rel], timeout=10)
+        stat = _git_run(['diff', '--numstat', '--no-index', '--', '/dev/null', rel], timeout=10, cwd=root)
         if stat and stat.returncode in (0, 1):
             parsed, add, dele = _parse_patch_numstat(stat.stdout, status='added')
             files.extend(parsed)
@@ -817,24 +859,26 @@ def create_patch_review(task_id, paths=None):
     task = next((t for t in tasks if t.get('id') == task_id), None)
     if not task:
         return {'ok': False, 'error': f'任务 {task_id} 不存在'}
+    patch_root = _task_patch_root(task)
     try:
         activity = (get_task_activity(task_id) or {}).get('activity') or []
     except Exception:
         activity = []
     selected_paths = (
-        _normalize_patch_paths(paths or [])
-        or _task_file_change_paths(task_id)
-        or _task_mentioned_patch_paths(task, activity)
+        _normalize_patch_paths(paths or [], root=patch_root)
+        or _task_file_change_paths(task_id, root=patch_root)
+        or _task_mentioned_patch_paths(task, activity, root=patch_root)
     )
     if not selected_paths:
         return {'ok': False, 'error': '未发现任务相关文件修改事件或明确提到的工作区变更，无法生成 patch 审批'}
     try:
-        diff, stats = _git_diff_for_paths(selected_paths)
+        diff, stats = _git_diff_for_paths(selected_paths, root=patch_root)
     except Exception as exc:
         return {'ok': False, 'error': f'生成 diff 失败: {exc}'}
     if not diff.strip():
         return {'ok': False, 'error': '这些文件没有可审批的工作区变更'}
-    head = _git_run(['rev-parse', '--short', 'HEAD'])
+    head = _git_run(['rev-parse', '--short', 'HEAD'], cwd=patch_root)
+    branch = _git_run(['rev-parse', '--abbrev-ref', 'HEAD'], cwd=patch_root)
     ts = now_iso()
     review = {
         'id': f'patch_{uuid.uuid4().hex[:16]}',
@@ -846,6 +890,9 @@ def create_patch_review(task_id, paths=None):
         'stats': stats,
         'diff': diff,
         'baseHead': head.stdout.strip() if head and head.returncode == 0 else '',
+        'worktreePath': str(patch_root.resolve()),
+        'worktreeBranch': branch.stdout.strip() if branch and branch.returncode == 0 else '',
+        'projectRoot': str(PROJECT_ROOT.resolve()),
         'createdAt': ts,
         'updatedAt': ts,
         'decidedAt': '',
@@ -864,6 +911,8 @@ def create_patch_review(task_id, paths=None):
         'patchId': review['id'],
         'paths': selected_paths,
         'status': 'pending',
+        'worktreePath': review.get('worktreePath', ''),
+        'worktreeBranch': review.get('worktreeBranch', ''),
         'remark': f'生成 Patch 审批：{len(selected_paths)} 个文件',
     }, trace_id=review.get('traceId', ''))
     return {'ok': True, 'review': _patch_review_public(review)}
@@ -880,10 +929,11 @@ def handle_patch_review_action(patch_id, action, reason=''):
         return {'ok': False, 'error': f'patch review 已是 {review.get("status", "unknown")}'}
 
     if action == 'reject':
+        patch_root = _patch_review_root(review)
         try:
             result = subprocess.run(
                 ['git', 'apply', '--reverse', '--whitespace=nowarn', '-'],
-                cwd=str(PROJECT_ROOT),
+                cwd=str(patch_root),
                 input=review.get('diff') or '',
                 text=True,
                 capture_output=True,
@@ -931,6 +981,8 @@ def handle_patch_review_action(patch_id, action, reason=''):
         'status': public.get('status', ''),
         'paths': review.get('paths') or [],
         'reason': reason,
+        'worktreePath': public.get('worktreePath') or review.get('worktreePath', ''),
+        'worktreeBranch': public.get('worktreeBranch') or review.get('worktreeBranch', ''),
         'remark': 'Patch 已准奏' if action == 'approve' else 'Patch 已驳回并尝试回滚',
     }, trace_id=review.get('traceId', ''))
     return {'ok': True, 'message': 'Patch 已准奏' if action == 'approve' else 'Patch 已驳回并回滚', 'review': public}
@@ -2298,8 +2350,26 @@ def _git_run_in(cwd, args, timeout=20):
 
 
 def _path_is_git_worktree(path):
-    path = pathlib.Path(path)
+    try:
+        path = pathlib.Path(path).resolve()
+    except Exception:
+        return False
     return path.exists() and (path / '.git').exists()
+
+
+def _task_patch_root(task):
+    isolation = _task_execution_isolation(task)
+    worktree_path = str((isolation or {}).get('worktreePath') or '').strip()
+    if worktree_path and _path_is_git_worktree(worktree_path):
+        return pathlib.Path(worktree_path).resolve()
+    return PROJECT_ROOT.resolve()
+
+
+def _patch_review_root(review):
+    worktree_path = str((review or {}).get('worktreePath') or '').strip()
+    if worktree_path and _path_is_git_worktree(worktree_path):
+        return pathlib.Path(worktree_path).resolve()
+    return PROJECT_ROOT.resolve()
 
 
 def _allocate_task_worktree(task_id, isolation):
@@ -6005,6 +6075,8 @@ def get_task_coding_session(task_id):
     activity_data = get_task_activity(task_id)
     activity = activity_data.get('activity') or []
     trace_id = activity_data.get('traceId') or task.get('traceId') or task.get('trace_id') or task_id
+    execution_isolation = _task_execution_isolation(task)
+    patch_root = _task_patch_root(task)
     events = []
     files = {}
     commands = []
@@ -6124,7 +6196,7 @@ def get_task_coding_session(task_id):
                 files[path]['outputs'] += 1
                 files[path]['latestAt'] = max(files[path]['latestAt'], item.get('mtime', ''))
 
-    for path in _task_mentioned_patch_paths(task, activity):
+    for path in _task_mentioned_patch_paths(task, activity, root=patch_root):
         event = _coding_event(
             'file.change',
             f'工作区变更 {path}',
@@ -6133,9 +6205,9 @@ def get_task_coding_session(task_id):
             detail='任务进展提到该文件，且工作区存在未审批变更',
             status='inferred',
             source='worktree-mentioned',
-            meta={'inferred': True},
+            meta={'inferred': True, 'worktreePath': str(patch_root)},
         )
-        if not _safe_source_file(path):
+        if patch_root != PROJECT_ROOT.resolve() or not _safe_source_file(path):
             event['sourceUrl'] = ''
         events.append(event)
         files.setdefault(path, {
@@ -6153,8 +6225,7 @@ def get_task_coding_session(task_id):
             files[path]['sourceUrl'] = event.get('sourceUrl')
         files[path]['latestAt'] = max(files[path]['latestAt'], event.get('at', ''))
 
-    checkpoint = get_worktree_checkpoint()
-    execution_isolation = _task_execution_isolation(task)
+    checkpoint = get_worktree_checkpoint(root=patch_root)
     patch_reviews = [_patch_review_public(item) for item in list_patch_reviews(task_id)]
     patch_counts = {}
     for review in patch_reviews:

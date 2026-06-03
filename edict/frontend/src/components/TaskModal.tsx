@@ -1052,12 +1052,15 @@ function PatchReviewRow({
   const insertions = review.stats?.insertions || 0;
   const deletions = review.stats?.deletions || 0;
   const fileMix = patchFileMix(review);
+  const patchLocation = review.worktreeBranch || (review.worktreePath ? 'task-worktree' : '');
   return (
     <div className="patch-row">
       <div className="patch-main">
         <span className={`patch-status ${patchTone(review.status)}`}>{patchStatusLabel(review.status)}</span>
         <span className="patch-name">{fileCount} 文件{fileMix ? ` · ${fileMix}` : ''} · +{insertions} -{deletions}</span>
-        <span className="patch-meta mono">{shortTrace(review.id)}{review.baseHead ? ` · ${review.baseHead}` : ''}</span>
+        <span className="patch-meta mono" title={review.worktreePath || undefined}>
+          {shortTrace(review.id)}{review.baseHead ? ` · ${review.baseHead}` : ''}{patchLocation ? ` · ${patchLocation}` : ''}
+        </span>
       </div>
       <div className="patch-paths">{(review.paths || []).slice(0, 3).map(shortPath).join(' · ')}</div>
       {review.lastError && <div className="patch-error">{review.lastError}</div>}

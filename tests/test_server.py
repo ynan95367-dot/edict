@@ -907,6 +907,78 @@ def test_patch_review_uses_mentioned_worktree_file_when_no_tool_event(tmp_path, 
     assert '+# Weekly' in created['review']['diffPreview']
 
 
+def test_patch_review_uses_task_dedicated_worktree_for_diff_checkpoint_and_reject(tmp_path, monkeypatch):
+    if not shutil.which('git'):
+        pytest.skip('git not available')
+    import server as srv
+
+    root = tmp_path / 'repo'
+    data = tmp_path / 'data'
+    src = root / 'src'
+    worktree = tmp_path / 'task-worktree'
+    data.mkdir(parents=True)
+    src.mkdir(parents=True)
+    subprocess.run(['git', 'init'], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(['git', 'config', 'user.email', 'test@example.com'], cwd=root, check=True)
+    subprocess.run(['git', 'config', 'user.name', 'Test User'], cwd=root, check=True)
+    main_file = src / 'app.py'
+    main_file.write_text('print("one")\n', encoding='utf-8')
+    subprocess.run(['git', 'add', 'src/app.py'], cwd=root, check=True)
+    subprocess.run(['git', 'commit', '-m', 'init'], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ['git', 'worktree', 'add', '-b', 'edict/JJC-WT-PATCH', str(worktree), 'HEAD'],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    worktree_file = worktree / 'src' / 'app.py'
+    worktree_file.write_text('print("two")\n', encoding='utf-8')
+    data.joinpath('tasks_source.json').write_text(json.dumps([
+        {
+            'id': 'JJC-WT-PATCH',
+            'title': '专属 worktree Patch',
+            'state': 'Doing',
+            'traceId': 'trc_worktree_patch',
+            'runSpec': {
+                'executionIsolation': {
+                    'mode': 'dedicated_worktree',
+                    'targetMode': 'dedicated_worktree',
+                    'status': 'active',
+                    'patchFirst': True,
+                    'requiresPatchReview': True,
+                    'worktreePath': str(worktree),
+                    'worktreeBranch': 'edict/JJC-WT-PATCH',
+                },
+            },
+        }
+    ], ensure_ascii=False), encoding='utf-8')
+
+    monkeypatch.setattr(srv, 'PROJECT_ROOT', root)
+    monkeypatch.setattr(srv, 'DATA', data)
+    monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data)
+
+    created = srv.create_patch_review('JJC-WT-PATCH', ['src/app.py'])
+    assert created['ok'] is True
+    review = created['review']
+    session = srv.get_task_coding_session('JJC-WT-PATCH')
+    rejected = srv.handle_patch_review_action(review['id'], 'reject', '回滚任务 worktree')
+
+    assert pathlib.Path(review['worktreePath']).resolve() == worktree.resolve()
+    assert review['worktreeBranch'] == 'edict/JJC-WT-PATCH'
+    assert '+print("two")' in review['diffPreview']
+    assert main_file.read_text(encoding='utf-8') == 'print("one")\n'
+    assert session['ok'] is True
+    assert pathlib.Path(session['checkpoint']['root']).resolve() == worktree.resolve()
+    assert session['checkpoint']['dirty'] is True
+    assert any(item['path'] == 'src/app.py' for item in session['checkpoint']['files'])
+    assert rejected['ok'] is True
+    assert rejected['review']['status'] == 'rejected'
+    assert pathlib.Path(rejected['review']['worktreePath']).resolve() == worktree.resolve()
+    assert worktree_file.read_text(encoding='utf-8') == 'print("one")\n'
+    assert main_file.read_text(encoding='utf-8') == 'print("one")\n'
+
+
 def test_coding_session_merges_opencode_session_tool_events(tmp_path, monkeypatch):
     import server as srv
 
