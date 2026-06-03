@@ -92,6 +92,9 @@ _DISPATCH_WORKER_ID = f'dashboard-{os.getpid()}'
 _DISPATCH_WORKER_STARTED_AT = ''
 _DISPATCH_WORKER_HEARTBEAT_AT = ''
 _DISPATCH_WORKER_STOPPED_AT = ''
+_AGENT_CONFIG_SYNC_LOCK = threading.Lock()
+_AGENT_CONFIG_SYNC_AT = 0.0
+_AGENT_CONFIG_SYNC_TTL_SEC = int(os.environ.get('EDICT_AGENT_CONFIG_SYNC_TTL_SEC', '30') or 30)
 _ANSI_RE = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
 _MODEL_FAILURE_COOLDOWN_SEC = int(os.environ.get('EDICT_MODEL_FAILURE_COOLDOWN_SEC', '1800') or 1800)
 _MODEL_TIMEOUT_RE = re.compile(r'(timeout|timed out|deadline|etimedout|超时)', re.I)
@@ -3206,6 +3209,95 @@ def _opencode_model(agent_id=''):
 
 def _agent_config():
     cfg = read_json(DATA / 'agent_config.json', {})
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _agent_config_has_opencode_models(cfg):
+    known = cfg.get('knownModels') if isinstance(cfg, dict) and isinstance(cfg.get('knownModels'), list) else []
+    for entry in known:
+        if isinstance(entry, dict):
+            model_id = str(entry.get('id') or entry.get('name') or '').strip()
+        else:
+            model_id = str(entry or '').strip()
+        if model_id.startswith('opencode/'):
+            return True
+    return False
+
+
+def _agent_config_needs_opencode_sync(cfg):
+    if _agent_runtime() != 'opencode':
+        return False
+    if not isinstance(cfg, dict) or not cfg:
+        return True
+    if str(cfg.get('runtime') or '').strip().lower() != 'opencode':
+        return True
+    if not _agent_config_has_opencode_models(cfg):
+        return True
+    if not isinstance(cfg.get('agents'), list) or not cfg.get('agents'):
+        return True
+    return False
+
+
+def _sync_opencode_agent_config(force=False):
+    """Best-effort sync from the live OpenCode CLI into dashboard config."""
+    global _AGENT_CONFIG_SYNC_AT
+    if _agent_runtime() != 'opencode':
+        return False
+    now_ts = datetime.datetime.now().timestamp()
+    if not force and now_ts - _AGENT_CONFIG_SYNC_AT < _AGENT_CONFIG_SYNC_TTL_SEC:
+        return False
+    with _AGENT_CONFIG_SYNC_LOCK:
+        now_ts = datetime.datetime.now().timestamp()
+        if not force and now_ts - _AGENT_CONFIG_SYNC_AT < _AGENT_CONFIG_SYNC_TTL_SEC:
+            return False
+        _AGENT_CONFIG_SYNC_AT = now_ts
+        env = os.environ.copy()
+        env['EDICT_RUNTIME'] = 'opencode'
+        env['EDICT_AGENT_RUNTIME'] = 'opencode'
+        opencode_bin = _resolve_opencode_bin()
+        if opencode_bin:
+            env['OPENCODE_BIN'] = opencode_bin
+        env.setdefault('OPENCODE_SERVER_URL', _opencode_server_url())
+        try:
+            proc = subprocess.run(
+                [python_bin(), str(SCRIPTS / 'sync_opencode_agents.py')],
+                cwd=str(PROJECT_ROOT),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=25,
+                check=False,
+            )
+        except Exception as exc:
+            log.warning(f'OpenCode agent config sync failed: {exc}')
+            _append_runtime_event('agent_config_sync_failed', payload={
+                'runtime': 'opencode',
+                'error': _clean_runtime_error(str(exc), limit=300) if '_clean_runtime_error' in globals() else str(exc)[:300],
+                'remark': 'OpenCode 模型同步异常',
+            }, confidence='low')
+            return False
+        if proc.returncode != 0:
+            error = proc.stderr or proc.stdout or f'exit {proc.returncode}'
+            log.warning(f'OpenCode agent config sync failed: {error.strip()[:500]}')
+            _append_runtime_event('agent_config_sync_failed', payload={
+                'runtime': 'opencode',
+                'exitCode': proc.returncode,
+                'error': _clean_runtime_error(error, limit=500) if '_clean_runtime_error' in globals() else error[:500],
+                'remark': 'OpenCode 模型同步失败',
+            }, confidence='low')
+            return False
+        _append_runtime_event('agent_config_synced', payload={
+            'runtime': 'opencode',
+            'remark': 'OpenCode agent/model 配置已同步',
+        }, confidence='medium')
+        return True
+
+
+def get_agent_config_response(force=False):
+    cfg = _agent_config()
+    if force or _agent_config_needs_opencode_sync(cfg):
+        if _sync_opencode_agent_config(force=force):
+            cfg = _agent_config()
     return cfg if isinstance(cfg, dict) else {}
 
 
@@ -8226,7 +8318,8 @@ class Handler(BaseHTTPRequestHandler):
             task_data_dir = get_task_data_dir()
             self.send_json(read_json(task_data_dir / 'live_status.json'))
         elif p == '/api/agent-config':
-            self.send_json(read_json(DATA / 'agent_config.json'))
+            force_refresh = (qs.get('refresh') or [''])[0] in {'1', 'true', 'yes'}
+            self.send_json(get_agent_config_response(force=force_refresh))
         elif p == '/api/model-health':
             self.send_json(get_model_health())
         elif p == '/api/capabilities':

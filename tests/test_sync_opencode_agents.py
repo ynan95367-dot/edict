@@ -41,6 +41,7 @@ def test_collect_opencode_models_keeps_configured_models_selectable(monkeypatch)
     assert "anthropic/claude-sonnet-4-6" in ids
     assert len(ids) == len(set(ids))
     assert models[0]["provider"] == "OpenCode"
+    assert next(m for m in models if m["id"] == "github-copilot/gpt-5.3-codex")["provider"] == "GitHub Copilot"
 
 
 def test_sync_dashboard_config_injects_opencode_known_models(tmp_path, monkeypatch):
@@ -136,3 +137,45 @@ def test_sync_dashboard_config_recovers_logged_model_choice(tmp_path, monkeypatc
 
     assert zhongshu["model"] == "github-copilot/gpt-4o"
     assert "github-copilot/gpt-4o" in ids
+
+
+def test_discover_opencode_models_uses_configured_bin(tmp_path, monkeypatch):
+    sync_opencode_agents = _load_sync_opencode_agents()
+    fake_bin = tmp_path / "opencode"
+    fake_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setenv("OPENCODE_BIN", str(fake_bin))
+    monkeypatch.setattr(sync_opencode_agents, "MODEL_CACHE", tmp_path / "model_cache.json")
+
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = "opencode/deepseek-v4-flash-free\ngithub-copilot/gpt-5.5-fast\n"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return Result()
+
+    monkeypatch.setattr(sync_opencode_agents.subprocess, "run", fake_run)
+
+    models = sync_opencode_agents.discover_opencode_models()
+    ids = [m["id"] for m in models]
+
+    assert calls[0][0] == str(fake_bin)
+    assert ids == ["opencode/deepseek-v4-flash-free", "github-copilot/gpt-5.5-fast"]
+
+
+def test_cleanup_unmanaged_opencode_artifacts_ignores_busy_runtime_dir(tmp_path, monkeypatch):
+    sync_opencode_agents = _load_sync_opencode_agents()
+    opencode_dir = tmp_path / ".opencode"
+    node_modules = opencode_dir / "node_modules"
+    node_modules.mkdir(parents=True)
+    monkeypatch.setattr(sync_opencode_agents, "OPENCODE_DIR", opencode_dir)
+
+    def fail_rmtree(path):
+        raise OSError(66, "Directory not empty")
+
+    monkeypatch.setattr(sync_opencode_agents.shutil, "rmtree", fail_rmtree)
+
+    sync_opencode_agents.cleanup_unmanaged_opencode_artifacts()

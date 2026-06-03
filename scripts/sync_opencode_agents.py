@@ -186,7 +186,8 @@ def discover_opencode_models() -> list[dict]:
     if cached:
         return cached
 
-    bin_path = shutil.which('opencode')
+    configured_bin = os.environ.get('OPENCODE_BIN', '').strip()
+    bin_path = configured_bin if configured_bin and pathlib.Path(configured_bin).exists() else shutil.which('opencode')
     if not bin_path:
         return []
     try:
@@ -238,12 +239,12 @@ def collect_opencode_models(cfg: dict, existing_models: list, default_model: str
         os.environ.get('OPENCODE_DEFAULT_MODEL'),
         cfg.get('model') if isinstance(cfg, dict) else '',
     ):
-        add(model_id, 'OpenCode')
+        add(model_id)
 
     cfg_agents = cfg.get('agent') if isinstance(cfg.get('agent'), dict) else {}
     for entry in cfg_agents.values():
         if isinstance(entry, dict):
-            add(entry.get('model'), 'OpenCode')
+            add(entry.get('model'))
 
     for entry in discover_opencode_models():
         add(entry)
@@ -296,10 +297,16 @@ def cleanup_unmanaged_opencode_artifacts() -> None:
         OPENCODE_DIR / 'package-lock.json',
         OPENCODE_DIR / '.gitignore',
     ):
-        if path.is_dir():
-            shutil.rmtree(path)
-        elif path.exists():
-            path.unlink()
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            elif path.exists():
+                path.unlink()
+        except OSError:
+            # OpenCode may keep package artifacts busy while the server is
+            # running.  These files are only cleanup targets; failing to remove
+            # them must not block regenerating agent/model config.
+            pass
 
 
 def build_prompt(agent_id: str) -> str:

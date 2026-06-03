@@ -759,3 +759,60 @@ def test_opencode_model_prefers_agent_config(monkeypatch, tmp_path):
 
     assert srv._opencode_model('taizi') == 'github-copilot/gpt-5.2-codex'
     assert srv._opencode_model('zhongshu') == 'opencode/deepseek-v4-flash-free'
+
+
+def test_agent_config_response_syncs_stale_opencode_models(monkeypatch, tmp_path):
+    """OpenCode mode should refresh stale dashboard config before serving model pickers."""
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    config_path = data_dir / 'agent_config.json'
+    config_path.write_text(json.dumps({
+        'defaultModel': 'github-copilot/claude-opus-4.6',
+        'knownModels': [{'id': 'github-copilot/claude-opus-4.6', 'label': 'Claude Opus 4.6'}],
+        'agents': [{'id': 'taizi', 'model': 'github-copilot/claude-opus-4.6'}],
+    }, ensure_ascii=False), encoding='utf-8')
+
+    fake_bin = tmp_path / 'opencode'
+    fake_bin.write_text('#!/bin/sh\n', encoding='utf-8')
+
+    monkeypatch.setenv('EDICT_RUNTIME', 'opencode')
+    monkeypatch.setenv('EDICT_AGENT_RUNTIME', 'opencode')
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, 'PROJECT_ROOT', tmp_path)
+    monkeypatch.setattr(srv, '_AGENT_CONFIG_SYNC_AT', 0.0)
+    monkeypatch.setattr(srv, '_resolve_opencode_bin', lambda: str(fake_bin))
+    monkeypatch.setattr(srv, '_append_runtime_event', lambda *args, **kwargs: None)
+
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = 'synced'
+        stderr = ''
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        config_path.write_text(json.dumps({
+            'runtime': 'opencode',
+            'defaultModel': 'opencode/deepseek-v4-flash-free',
+            'knownModels': [
+                {'id': 'opencode/deepseek-v4-flash-free', 'label': 'DeepSeek V4 Flash Free', 'provider': 'OpenCode'},
+                {'id': 'github-copilot/gpt-5.5-fast', 'label': 'GPT 5.5 Fast', 'provider': 'GitHub Copilot'},
+            ],
+            'agents': [{'id': 'taizi', 'model': 'opencode/deepseek-v4-flash-free'}],
+        }, ensure_ascii=False), encoding='utf-8')
+        return Result()
+
+    monkeypatch.setattr(srv.subprocess, 'run', fake_run)
+
+    cfg = srv.get_agent_config_response()
+    ids = [m['id'] for m in cfg['knownModels']]
+
+    assert cfg['runtime'] == 'opencode'
+    assert 'opencode/deepseek-v4-flash-free' in ids
+    assert 'github-copilot/gpt-5.5-fast' in ids
+    assert calls
+    assert calls[0][0][-1].endswith('sync_opencode_agents.py')
+    assert calls[0][1]['env']['OPENCODE_BIN'] == str(fake_bin)
