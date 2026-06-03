@@ -19,7 +19,10 @@ def test_collect_opencode_models_keeps_configured_models_selectable(monkeypatch)
     monkeypatch.setattr(
         sync_opencode_agents,
         "discover_opencode_models",
-        lambda: [{"id": "opencode/mimo-v2.5-free", "label": "Mimo V2.5 Free", "provider": "OpenCode"}],
+        lambda: [
+            {"id": "opencode/mimo-v2.5-free", "label": "Mimo V2.5 Free", "provider": "OpenCode"},
+            {"id": "github-copilot/gpt-5.3-codex", "label": "GPT 5.3 Codex", "provider": "GitHub Copilot"},
+        ],
     )
 
     cfg = {
@@ -38,7 +41,7 @@ def test_collect_opencode_models_keeps_configured_models_selectable(monkeypatch)
     assert ids[0] == "opencode/deepseek-v4-flash-free"
     assert "github-copilot/gpt-5.3-codex" in ids
     assert "opencode/mimo-v2.5-free" in ids
-    assert "anthropic/claude-sonnet-4-6" in ids
+    assert "anthropic/claude-sonnet-4-6" not in ids
     assert len(ids) == len(set(ids))
     assert models[0]["provider"] == "OpenCode"
     assert next(m for m in models if m["id"] == "github-copilot/gpt-5.3-codex")["provider"] == "GitHub Copilot"
@@ -198,6 +201,47 @@ def test_discover_opencode_models_force_refresh_skips_cache(tmp_path, monkeypatc
     assert calls
     assert ids == ["moonshotai-cn/kimi-k2.6", "openai/gpt-5.5-pro"]
     assert models[0]["provider"] == "Moonshot AI (China)"
+
+
+def test_sync_opencode_config_filters_legacy_models_when_live_catalog_exists(tmp_path, monkeypatch):
+    sync_opencode_agents = _load_sync_opencode_agents()
+    monkeypatch.delenv("OPENCODE_MODEL", raising=False)
+    monkeypatch.delenv("OPENCODE_DEFAULT_MODEL", raising=False)
+    monkeypatch.setattr(sync_opencode_agents, "BASE", tmp_path)
+    monkeypatch.setattr(sync_opencode_agents, "DATA", tmp_path / "data")
+    monkeypatch.setattr(sync_opencode_agents, "OPENCODE_CFG", tmp_path / "opencode.json")
+    monkeypatch.setattr(
+        sync_opencode_agents,
+        "discover_opencode_models",
+        lambda: [
+            {"id": "opencode/big-pickle", "label": "Big Pickle", "provider": "OpenCode"},
+            {"id": "moonshotai-cn/kimi-k2.6", "label": "Kimi K2.6", "provider": "Moonshot AI (China)"},
+        ],
+    )
+
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "agent_config.json").write_text(
+        json.dumps({"agents": [{"id": "taizi", "model": "copilot/o3-mini"}]}),
+        encoding="utf-8",
+    )
+    (tmp_path / "opencode.json").write_text(
+        json.dumps(
+            {
+                "model": "copilot/o3-mini",
+                "agent": {
+                    "taizi": {"model": "copilot/o3-mini"},
+                    "zhongshu": {"model": "moonshotai-cn/kimi-k2.6"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = sync_opencode_agents.sync_opencode_config()
+
+    assert cfg["model"] == "opencode/deepseek-v4-flash-free"
+    assert cfg["agent"]["taizi"]["model"] == "opencode/deepseek-v4-flash-free"
+    assert cfg["agent"]["zhongshu"]["model"] == "moonshotai-cn/kimi-k2.6"
 
 
 def test_cleanup_unmanaged_opencode_artifacts_ignores_busy_runtime_dir(tmp_path, monkeypatch):

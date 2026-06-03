@@ -3579,6 +3579,10 @@ def _apply_agent_model_immediate(agent_id, new_model, *, reason='', source='auto
                 'defaultModel': cfg.get('defaultModel') or new_model,
             })
         cfg['agents'] = agents
+        known = cfg.get('knownModels') if isinstance(cfg.get('knownModels'), list) else []
+        if new_model and not any(isinstance(entry, dict) and entry.get('id') == new_model for entry in known):
+            known.append({'id': new_model, 'label': _model_label(new_model, known), 'provider': _model_provider(new_model, known)})
+        cfg['knownModels'] = known
         cfg['updatedAt'] = now_iso()
         cfg['lastAutoModelChange'] = {'at': now_iso(), 'agentId': agent_id, 'oldModel': old['value'], 'newModel': new_model, 'source': source, 'reason': reason}
         return cfg
@@ -3610,7 +3614,7 @@ def _apply_agent_model_immediate(agent_id, new_model, *, reason='', source='auto
         'newModel': new_model,
         'source': source,
         'reason': reason,
-        'autoFailover': True,
+        'autoFailover': source == 'auto-failover',
     }
     _append_model_change_log(change)
     return change
@@ -3885,6 +3889,9 @@ def get_model_health():
 
 def _model_registry_file():
     return DATA / 'model_registry.json'
+
+
+_MODEL_REGISTRY_CACHE_TTL_SEC = 60
 
 
 def _custom_models_file():
@@ -4164,6 +4171,12 @@ def _model_registry_summary(models, sources):
 
 
 def get_model_registry(force=False):
+    if not force:
+        cached = atomic_json_read(_model_registry_file(), {})
+        if isinstance(cached, dict) and cached.get('version') == 2 and isinstance(cached.get('models'), list):
+            age = _iso_age(cached.get('generatedAt'))
+            if age is not None and age < _MODEL_REGISTRY_CACHE_TTL_SEC:
+                return cached
     if force:
         _sync_opencode_agent_config(force=True)
     cfg = get_agent_config_response(force=False)
@@ -4173,6 +4186,11 @@ def get_model_registry(force=False):
     cli_entries, cli_source = _opencode_cli_model_entries(force=force)
     provider_entries, provider_source = _opencode_provider_model_entries()
     manual_entries = _read_custom_models(mask=True)
+    live_ids = {
+        str(entry.get('id') or '').strip()
+        for entry in [*cli_entries, *provider_entries, *manual_entries]
+        if isinstance(entry, dict) and entry.get('id')
+    }
     current_entries = [
         {
             'id': entry.get('id'),
@@ -4181,7 +4199,7 @@ def get_model_registry(force=False):
             'source': 'agent-config',
         }
         for entry in known
-        if isinstance(entry, dict) and entry.get('id')
+        if isinstance(entry, dict) and entry.get('id') and (not live_ids or entry.get('id') in live_ids)
     ]
     models = _merge_model_registry_entries([current_entries, cli_entries, provider_entries, manual_entries])
     for item in models:
@@ -4211,6 +4229,7 @@ def get_model_registry(force=False):
     ))
     sources = [cli_source, provider_source, {'id': 'manual-api', 'label': '手动 API', 'ok': True, 'count': len(manual_entries), 'latencyMs': 0, 'error': ''}]
     payload = {
+        'version': 2,
         'ok': True,
         'runtime': _agent_runtime(),
         'runtimeLabel': _runtime_label(),
@@ -9343,6 +9362,32 @@ class Handler(BaseHTTPRequestHandler):
             model = body.get('model', '').strip()
             if not agent_id or not model:
                 self.send_json({'ok': False, 'error': 'agentId and model required'}, 400)
+                return
+
+            if _agent_runtime() == 'opencode':
+                registry = get_model_registry(force=False)
+                selectable = {item.get('id') for item in registry.get('models', []) if isinstance(item, dict)}
+                if selectable and model not in selectable:
+                    self.send_json({
+                        'ok': False,
+                        'error': f'模型不在 OpenCode 当前可用列表中: {model}。请先点击“同步 OpenCode”。',
+                    }, 400)
+                    return
+                old_model = _agent_current_model(agent_id)
+                change = _apply_agent_model_immediate(
+                    agent_id,
+                    model,
+                    old_model=old_model,
+                    source='dashboard',
+                    reason='manual model switch from dashboard',
+                )
+                self.send_json({
+                    'ok': True,
+                    'message': f'{agent_id} 已切换为 {model}',
+                    'change': change,
+                    'agentConfig': get_agent_config_response(force=False),
+                    'registry': get_model_registry(force=False),
+                })
                 return
 
             # Write to pending (atomic)

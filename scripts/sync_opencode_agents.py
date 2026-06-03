@@ -162,6 +162,40 @@ def normalize_model_entry(entry, default_provider: str = ''):
     }
 
 
+def configured_provider_models(cfg: dict) -> list[dict]:
+    """Return project-local custom provider models from opencode.json."""
+    if not isinstance(cfg, dict):
+        return []
+    providers = cfg.get('provider') if isinstance(cfg.get('provider'), dict) else {}
+    entries = []
+    for provider_id, provider_cfg in providers.items():
+        if not isinstance(provider_cfg, dict):
+            continue
+        provider_id = str(provider_cfg.get('id') or provider_id or '').strip()
+        provider_name = str(provider_cfg.get('name') or provider_for_model(provider_id)).strip()
+        models = provider_cfg.get('models') if isinstance(provider_cfg.get('models'), dict) else {}
+        for model_id, model_cfg in models.items():
+            model_cfg = model_cfg if isinstance(model_cfg, dict) else {}
+            raw_id = str(model_cfg.get('id') or model_id or '').strip()
+            if not raw_id:
+                continue
+            full_id = raw_id if '/' in raw_id and raw_id.startswith(f'{provider_id}/') else f'{provider_id}/{raw_id}'
+            entries.append({
+                'id': full_id,
+                'label': str(model_cfg.get('name') or model_cfg.get('label') or label_for_model(full_id)).strip(),
+                'provider': provider_name,
+            })
+    return entries
+
+
+def valid_model_ids_for_opencode(cfg: dict, discovered: list[dict] | None = None) -> set[str]:
+    live = list(discovered) if discovered is not None else discover_opencode_models()
+    valid = {m['id'] for m in live if isinstance(m, dict) and m.get('id')}
+    valid.update(m['id'] for m in configured_provider_models(cfg) if m.get('id'))
+    valid.update(m['id'] for m in OPENCODE_MODEL_PRESETS)
+    return valid
+
+
 def cached_opencode_models() -> list[dict]:
     if os.environ.get('OPENCODE_MODEL_REFRESH') or os.environ.get('OPENCODE_MODELS_REFRESH'):
         return []
@@ -237,25 +271,41 @@ def collect_opencode_models(cfg: dict, existing_models: list, default_model: str
         seen.add(normalized['id'])
         merged.append(normalized)
 
+    discovered = discover_opencode_models()
+    provider_models = configured_provider_models(cfg)
+    valid_ids = valid_model_ids_for_opencode(cfg, discovered)
+    has_live_catalog = bool(discovered or provider_models)
+
+    def is_valid_when_live(entry):
+        normalized = normalize_model_entry(entry)
+        if not normalized:
+            return False
+        return (not has_live_catalog) or normalized['id'] in valid_ids
+
     for model_id in (
         default_model,
         os.environ.get('OPENCODE_MODEL'),
         os.environ.get('OPENCODE_DEFAULT_MODEL'),
         cfg.get('model') if isinstance(cfg, dict) else '',
     ):
-        add(model_id)
+        if is_valid_when_live(model_id):
+            add(model_id)
 
     cfg_agents = cfg.get('agent') if isinstance(cfg.get('agent'), dict) else {}
     for entry in cfg_agents.values():
         if isinstance(entry, dict):
-            add(entry.get('model'))
+            if is_valid_when_live(entry.get('model')):
+                add(entry.get('model'))
 
-    for entry in discover_opencode_models():
+    for entry in discovered:
+        add(entry)
+    for entry in provider_models:
         add(entry)
     for entry in OPENCODE_MODEL_PRESETS:
         add(entry)
     for entry in existing_models or []:
-        add(entry)
+        if is_valid_when_live(entry):
+            add(entry)
 
     return merged
 
@@ -365,17 +415,29 @@ def sync_opencode_config() -> dict:
     cfg['server'] = server
 
     cfg.setdefault('default_agent', 'taizi')
+    discovered_models = discover_opencode_models()
+    valid_ids = valid_model_ids_for_opencode(cfg, discovered_models)
     default_model = os.environ.get('OPENCODE_MODEL') or os.environ.get('OPENCODE_DEFAULT_MODEL') or 'opencode/deepseek-v4-flash-free'
-    if cfg.get('model') in ('', None, 'github-copilot/claude-sonnet-4.6', 'github-copilot/gpt-4o'):
+    if valid_ids and default_model not in valid_ids:
+        default_model = 'opencode/deepseek-v4-flash-free' if 'opencode/deepseek-v4-flash-free' in valid_ids else sorted(valid_ids)[0]
+    if cfg.get('model') in ('', None, 'github-copilot/claude-sonnet-4.6', 'github-copilot/gpt-4o') or (valid_ids and cfg.get('model') not in valid_ids):
         cfg['model'] = default_model
     agents = cfg.get('agent') if isinstance(cfg.get('agent'), dict) else {}
     dashboard_models = dashboard_agent_models()
     logged_models = latest_logged_agent_models()
+
+    def choose_model(*candidates: str) -> str:
+        for candidate in candidates:
+            model_id = str(candidate or '').strip()
+            if model_id and ((not valid_ids) or model_id in valid_ids):
+                return model_id
+        return default_model
+
     for agent_id in AGENT_ORDER:
         meta = ID_LABEL[agent_id]
         existing = agents.get(agent_id) if isinstance(agents.get(agent_id), dict) else {}
         entry = dict(existing)
-        model = entry.get('model') or logged_models.get(agent_id) or dashboard_models.get(agent_id)
+        model = choose_model(entry.get('model'), logged_models.get(agent_id), dashboard_models.get(agent_id), default_model)
         if model:
             entry['model'] = model
         entry['description'] = entry.get('description') or f'{meta["label"]}：{meta["duty"]}'

@@ -205,7 +205,56 @@ def test_model_registry_merges_opencode_cli_server_manual_and_latency(monkeypatc
     assert by_id['moonshotai-cn/kimi-k2.6']['provider'] == 'Moonshot AI (China)'
     assert by_id['moonshotai-cn/kimi-k2.6']['latencyMs'] == 680
     assert by_id['openrouter/anthropic/claude-3.5-sonnet']['apiKeyMasked'] == 'sk-t••••cret'
-    assert registry['summary']['total'] >= 5
+    assert registry['summary']['total'] == 4
+
+
+def test_model_registry_hides_agent_config_only_legacy_models(monkeypatch, tmp_path):
+    """Legacy OpenClaw/Copilot leftovers should not appear when OpenCode has a live catalog."""
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    (data_dir / 'agent_config.json').write_text(
+        json.dumps(
+            {
+                'runtime': 'opencode',
+                'defaultModel': 'opencode/deepseek-v4-flash-free',
+                'knownModels': [
+                    {'id': 'anthropic/claude-haiku-3-5', 'label': 'Claude Haiku 3.5', 'provider': 'Anthropic'},
+                    {'id': 'copilot/o3-mini', 'label': 'O3 Mini', 'provider': 'Copilot'},
+                    {'id': 'moonshotai-cn/kimi-k2.6', 'label': 'Kimi K2.6', 'provider': 'Moonshot AI (China)'},
+                ],
+                'agents': [
+                    {'id': 'taizi', 'label': '太子', 'role': '太子', 'emoji': '🤴', 'model': 'anthropic/claude-haiku-3-5'},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding='utf-8',
+    )
+    monkeypatch.setenv('EDICT_RUNTIME', 'opencode')
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, 'PROJECT_ROOT', tmp_path)
+    monkeypatch.setattr(srv, '_sync_opencode_agent_config', lambda force=False: False)
+    monkeypatch.setattr(
+        srv,
+        '_opencode_cli_model_entries',
+        lambda force=False: (
+            [{'id': 'moonshotai-cn/kimi-k2.6', 'label': 'Kimi K2.6', 'provider': 'Moonshot AI (China)', 'source': 'opencode-cli'}],
+            {'id': 'opencode-cli', 'label': 'OpenCode CLI', 'ok': True, 'count': 1, 'latencyMs': 1, 'error': ''},
+        ),
+    )
+    monkeypatch.setattr(
+        srv,
+        '_opencode_provider_model_entries',
+        lambda: ([], {'id': 'opencode-server', 'label': 'OpenCode Server', 'ok': True, 'count': 0, 'latencyMs': 1, 'error': ''}),
+    )
+
+    registry = srv.get_model_registry(force=True)
+    ids = [m['id'] for m in registry['models']]
+
+    assert ids == ['moonshotai-cn/kimi-k2.6']
+    assert registry['summary']['providers'] == {'Moonshot AI (China)': 1}
 
 
 def test_add_custom_model_writes_dashboard_and_opencode_provider(monkeypatch, tmp_path):

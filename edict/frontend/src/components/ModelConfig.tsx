@@ -152,6 +152,7 @@ export default function ModelConfig() {
   const [registry, setRegistry] = useState<ModelRegistryData | null>(null);
   const [registryError, setRegistryError] = useState('');
   const [registryLoading, setRegistryLoading] = useState(false);
+  const [modelQuery, setModelQuery] = useState('');
   const [customModel, setCustomModel] = useState({
     providerId: 'openrouter',
     providerName: 'OpenRouter',
@@ -230,14 +231,34 @@ export default function ModelConfig() {
     return map;
   }, [registry]);
   const visibleRegistryModels = useMemo(() => {
-    const items = [...(registry?.models || [])];
+    const q = modelQuery.trim().toLowerCase();
+    const items = [...(registry?.models || [])].filter((item) => {
+      if (!q) return true;
+      return [
+        item.id,
+        item.label,
+        item.provider,
+        item.providerId,
+        item.tierLabel,
+        ...(item.sources || []),
+      ].some((value) => String(value || '').toLowerCase().includes(q));
+    });
     return items.sort((a, b) => {
+      const sourceRank = (item: ModelRegistryEntry) => {
+        const sources = item.sources || [item.source || ''];
+        if (sources.includes('opencode-cli')) return 0;
+        if (sources.includes('opencode-server')) return 1;
+        if (sources.includes('manual-api')) return 2;
+        return 3;
+      };
+      const sr = sourceRank(a) - sourceRank(b);
+      if (sr !== 0) return sr;
       const al = typeof a.latencyMs === 'number' ? a.latencyMs : Number.MAX_SAFE_INTEGER;
       const bl = typeof b.latencyMs === 'number' ? b.latencyMs : Number.MAX_SAFE_INTEGER;
       if (al !== bl) return al - bl;
       return `${a.provider || ''}${a.label || a.id}`.localeCompare(`${b.provider || ''}${b.label || b.id}`);
     });
-  }, [registry]);
+  }, [registry, modelQuery]);
 
   if (!agentConfig?.agents) {
     return <div className="empty" style={{ gridColumn: '1/-1' }}>⚠️ 请先启动本地服务器</div>;
@@ -287,14 +308,16 @@ export default function ModelConfig() {
     try {
       const r = await api.setModel(agentId, model);
       if (r.ok) {
-        setStatusMap((p) => ({ ...p, [agentId]: { cls: 'ok', text: '✅ 已提交，运行时配置刷新中（约5秒）' } }));
+        setStatusMap((p) => ({ ...p, [agentId]: { cls: 'ok', text: `已切换到 ${model}` } }));
         toast(agentId + ' 模型已更改', 'ok');
-        setTimeout(() => { loadAgentConfig(); loadHealth(); }, 5500);
+        await loadAgentConfig();
+        await loadRegistry(false);
+        await loadHealth();
       } else {
-        setStatusMap((p) => ({ ...p, [agentId]: { cls: 'err', text: '❌ ' + (r.error || '错误') } }));
+        setStatusMap((p) => ({ ...p, [agentId]: { cls: 'err', text: r.error || '模型切换失败' } }));
       }
     } catch {
-      setStatusMap((p) => ({ ...p, [agentId]: { cls: 'err', text: '❌ 无法连接服务器' } }));
+      setStatusMap((p) => ({ ...p, [agentId]: { cls: 'err', text: '无法连接服务器' } }));
     }
   };
 
@@ -343,6 +366,15 @@ export default function ModelConfig() {
         </div>
 
         {registryError && <div className="mh-error">{registryError}</div>}
+
+        <div className="mr-tools">
+          <input
+            value={modelQuery}
+            onChange={(e) => setModelQuery(e.target.value)}
+            placeholder="搜索模型 / provider，例如 kimi、gpt-5.5、openai"
+          />
+          <span>当前显示 {visibleRegistryModels.length} / {registry?.summary?.total || models.length}</span>
+        </div>
 
         <div className="mr-layout">
           <div className="mr-table">

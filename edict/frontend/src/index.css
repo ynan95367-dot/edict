@@ -714,6 +714,11 @@ textarea:focus-visible {
 .mr-source span { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mr-source b { color: var(--text); font-size: 15px; }
 .mr-source small { grid-column: 1 / -1; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mr-tools { display: grid; grid-template-columns: minmax(220px, 1fr) auto; gap: 10px; align-items: center; margin-bottom: 12px; }
+.mr-tools input { width: 100%; min-width: 0; background: var(--panel2); border: 1px solid var(--line); border-radius: 7px; color: var(--text); padding: 8px 10px; font-size: 12px; outline: none; }
+.mr-tools input:focus { border-color: var(--acc); }
+.mr-tools input::placeholder { color: #64708a; }
+.mr-tools span { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .mr-layout { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(300px, .9fr); gap: 12px; align-items: start; }
 .mr-table { border: 1px solid rgba(255,255,255,.08); border-radius: 8px; overflow: hidden; background: rgba(4,7,11,.38); max-height: 520px; overflow-y: auto; }
 .mr-row { display: grid; grid-template-columns: minmax(190px, 1.5fr) minmax(92px, .7fr) minmax(76px, .55fr) minmax(150px, 1fr); gap: 10px; align-items: center; padding: 9px 12px; border-top: 1px solid rgba(255,255,255,.06); min-width: 0; }
@@ -791,6 +796,7 @@ textarea:focus-visible {
 .cl-row:last-child { border-bottom: none; }
 @media (max-width: 980px) {
   .mr-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mr-tools { grid-template-columns: 1fr; }
   .mr-layout { grid-template-columns: 1fr; }
   .mr-row { grid-template-columns: 1fr; gap: 6px; }
   .mr-row-head { display: none; }
