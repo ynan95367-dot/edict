@@ -225,6 +225,12 @@ export interface ExecutionIsolation {
   rollback?: string;
   reason?: string;
   guardrails?: string[];
+  previousMode?: string;
+  worktreePath?: string;
+  worktreeBranch?: string;
+  baseHead?: string;
+  allocatedAt?: string;
+  lastError?: string;
 }
 
 export interface CapabilitiesResult {

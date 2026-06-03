@@ -2275,11 +2275,118 @@ def _task_execution_isolation(task):
     )
 
 
+def _task_worktree_slug(task_id):
+    slug = re.sub(r'[^A-Za-z0-9_.-]+', '-', str(task_id or '')).strip('.-')
+    return slug or f'task-{uuid.uuid4().hex[:8]}'
+
+
+def _task_worktree_base_dir():
+    return PROJECT_ROOT / '.edict' / 'worktrees'
+
+
+def _git_run_in(cwd, args, timeout=20):
+    try:
+        return subprocess.run(
+            ['git', *args],
+            cwd=str(cwd),
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except Exception:
+        return None
+
+
+def _path_is_git_worktree(path):
+    path = pathlib.Path(path)
+    return path.exists() and (path / '.git').exists()
+
+
+def _allocate_task_worktree(task_id, isolation):
+    """Create or reuse a dedicated git worktree for an isolated task."""
+    isolation = dict(isolation or {})
+    if isolation.get('targetMode') != 'dedicated_worktree':
+        return isolation
+
+    existing = str(isolation.get('worktreePath') or '').strip()
+    if existing and _path_is_git_worktree(existing):
+        worktree_path = pathlib.Path(existing).resolve()
+        head = _git_run_in(worktree_path, ['rev-parse', '--short', 'HEAD'], timeout=5)
+        isolation.update({
+            'mode': 'dedicated_worktree',
+            'status': 'active',
+            'worktreePath': str(worktree_path),
+            'baseHead': head.stdout.strip() if head and head.returncode == 0 else isolation.get('baseHead', ''),
+        })
+        return isolation
+
+    root_check = _git_run(['rev-parse', '--show-toplevel'], timeout=5)
+    if not root_check or root_check.returncode != 0:
+        raise RuntimeError('git worktree 不可用：当前项目不是 git 仓库')
+
+    base_head = _git_run(['rev-parse', 'HEAD'], timeout=5)
+    if not base_head or base_head.returncode != 0:
+        err = (base_head.stderr if base_head else 'git rev-parse failed') or ''
+        raise RuntimeError(f'无法读取当前 HEAD: {err.strip()[:200]}')
+
+    slug = _task_worktree_slug(task_id)
+    worktree_dir = (_task_worktree_base_dir() / slug).resolve()
+    branch_name = f'edict/{slug}'
+    worktree_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    if worktree_dir.exists() and not _path_is_git_worktree(worktree_dir):
+        raise RuntimeError(f'worktree 路径已存在但不是 git worktree: {worktree_dir}')
+
+    if not worktree_dir.exists():
+        result = _git_run(['worktree', 'add', '-b', branch_name, str(worktree_dir), 'HEAD'], timeout=60)
+        if not result or result.returncode != 0:
+            err = ((result.stderr or result.stdout) if result else 'git worktree add failed').strip()
+            if 'already exists' in err or 'already checked out' in err:
+                result = _git_run(['worktree', 'add', str(worktree_dir), branch_name], timeout=60)
+                err = ((result.stderr or result.stdout) if result else err).strip()
+            if not result or result.returncode != 0:
+                raise RuntimeError(err[:500] or 'git worktree add failed')
+
+    if not _path_is_git_worktree(worktree_dir):
+        raise RuntimeError(f'worktree 创建后不可用: {worktree_dir}')
+
+    short_head = _git_run_in(worktree_dir, ['rev-parse', '--short', 'HEAD'], timeout=5)
+    previous_mode = isolation.get('mode', '')
+    isolation.update({
+        'previousMode': previous_mode if previous_mode != 'dedicated_worktree' else isolation.get('previousMode', ''),
+        'mode': 'dedicated_worktree',
+        'status': 'active',
+        'label': isolation.get('label') or '专属 Worktree',
+        'worktreePath': str(worktree_dir),
+        'worktreeBranch': branch_name,
+        'baseHead': short_head.stdout.strip() if short_head and short_head.returncode == 0 else base_head.stdout.strip()[:12],
+        'allocatedAt': now_iso(),
+    })
+    return isolation
+
+
+def _apply_task_execution_isolation(task, isolation):
+    if not isinstance(isolation, dict) or not isolation.get('mode'):
+        return
+    task['executionIsolation'] = isolation
+    for key in ('runSpec', 'templateParams'):
+        container = task.get(key)
+        if isinstance(container, dict):
+            container['executionIsolation'] = isolation
+    sched = _ensure_scheduler(task)
+    sched['executionIsolation'] = isolation
+    if isolation.get('worktreePath'):
+        sched['worktreePath'] = isolation.get('worktreePath')
+        sched['worktreeBranch'] = isolation.get('worktreeBranch', '')
+        sched['worktreeBaseHead'] = isolation.get('baseHead', '')
+
+
 def _dispatch_isolation_instructions(isolation):
     if not isinstance(isolation, dict) or not isolation.get('mode'):
         return ''
     guardrails = isolation.get('guardrails') if isinstance(isolation.get('guardrails'), list) else []
     guardrail_text = ''.join(f'\n- {item}' for item in guardrails[:5])
+    worktree_line = f'\nWorktree: {isolation.get("worktreePath")}' if isolation.get('worktreePath') else ''
     return (
         f'\n\n🔒 执行隔离要求\n'
         f'模式: {isolation.get("label", isolation.get("mode", ""))} '
@@ -2289,6 +2396,7 @@ def _dispatch_isolation_instructions(isolation):
         f'Patch 审批: {"需要" if isolation.get("requiresPatchReview") else "按需"}；'
         f'Checkpoint: {isolation.get("checkpoint", "")}；'
         f'Rollback: {isolation.get("rollback", "")}'
+        f'{worktree_line}'
         f'{guardrail_text}\n'
         f'如需修改文件，必须在进展中写明变更路径，便于看板生成 Patch 审批。'
     )
@@ -4903,7 +5011,10 @@ def _opencode_session_belongs_to_project(session):
         if not directory:
             continue
         try:
-            if pathlib.Path(directory).resolve() == PROJECT_ROOT.resolve():
+            resolved = pathlib.Path(directory).resolve()
+            project_root = PROJECT_ROOT.resolve()
+            worktree_root = _task_worktree_base_dir().resolve()
+            if resolved == project_root or _is_within(resolved, worktree_root):
                 return True
         except Exception:
             continue
@@ -6600,6 +6711,9 @@ def _execute_dispatch_outbox_item(item):
     dispatch_payload = _build_dispatch_payload(task_id, task, new_state, agent_id, trigger)
     msg = payload.get('message') or dispatch_payload['message']
     execution_isolation = payload.get('executionIsolation') or dispatch_payload.get('executionIsolation') or _task_execution_isolation(task)
+    dispatch_dir = pathlib.Path(execution_isolation.get('worktreePath') or PROJECT_ROOT).resolve()
+    if not dispatch_dir.exists():
+        dispatch_dir = PROJECT_ROOT.resolve()
     runtime = _agent_runtime()
     runtime_label = _runtime_label()
     dispatch_env = os.environ.copy()
@@ -6615,6 +6729,8 @@ def _execute_dispatch_outbox_item(item):
         'EDICT_PATCH_FIRST': '1' if execution_isolation.get('patchFirst') else '0',
         'EDICT_PATCH_REVIEW_REQUIRED': '1' if execution_isolation.get('requiresPatchReview') else '0',
         'EDICT_ROLLBACK_POLICY': str(execution_isolation.get('rollback', '')),
+        'EDICT_PROJECT_ROOT': str(PROJECT_ROOT.resolve()),
+        'EDICT_WORKTREE_PATH': str(dispatch_dir),
     })
 
     def _update_if_current(status, error='', session_id='', flow_remark=''):
@@ -6722,7 +6838,7 @@ def _execute_dispatch_outbox_item(item):
             cmd = [
                 opencode_bin, 'run',
                 '--attach', _opencode_server_url(),
-                '--dir', str(BASE.parent),
+                '--dir', str(dispatch_dir),
                 '--agent', agent_id,
                 '--format', 'json',
                 '--title', f'{task_id} [{trace_id}] {title}'[:120],
@@ -6801,7 +6917,7 @@ def _execute_dispatch_outbox_item(item):
                 'executionIsolation': execution_isolation,
                 'remark': f'开始派发: {agent_id} (第{attempt}次)',
             }, trace_id=trace_id)
-            result = _run_capture_timeout(cmd, timeout=310, env=dispatch_env)
+            result = _run_capture_timeout(cmd, timeout=310, env=dispatch_env, cwd=str(dispatch_dir))
             if result.returncode == 0:
                 session_id = _opencode_session_id_from_output(result.stdout) if runtime == 'opencode' else ''
                 session_error = _opencode_session_error(session_id) if runtime == 'opencode' else ''
@@ -6962,8 +7078,7 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
 
     dispatch_id = uuid.uuid4().hex
     dispatch_started_at = now_iso()
-    payload = _build_dispatch_payload(task_id, task, new_state, agent_id, trigger)
-    trace_id = payload.get('traceId', '')
+    trace_id = _ensure_trace_id(task)
     existing_dispatch = next((
         item for item in _outbox_list(task_id=task_id, limit=1000)
         if item.get('kind') == 'dispatch'
@@ -6998,8 +7113,73 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
         log.info(f'ℹ️ {task_id} 已有未完成派发，跳过重复入队 → {agent_id}')
         return
 
+    execution_isolation = _task_execution_isolation(task)
+    try:
+        allocated_isolation = _allocate_task_worktree(task_id, execution_isolation)
+    except Exception as exc:
+        err = str(exc)[:500]
+        failed_isolation = dict(execution_isolation or {})
+        failed_isolation.update({
+            'status': 'allocation_failed',
+            'lastError': err,
+            'failedAt': now_iso(),
+        })
+        _apply_task_execution_isolation(task, failed_isolation)
+        _update_task_scheduler(task_id, lambda t, s: (
+            _apply_task_execution_isolation(t, failed_isolation),
+            s.update({
+                'lastDispatchAt': dispatch_started_at,
+                'lastDispatchStatus': 'worktree-failed',
+                'lastDispatchAgent': agent_id,
+                'lastDispatchState': new_state,
+                'lastDispatchTrigger': trigger,
+                'lastDispatchError': err,
+            }),
+            _scheduler_add_flow(t, f'专属 worktree 分配失败：{err}', to=_STATE_LABELS.get(new_state, new_state))
+        ))
+        _append_runtime_event('dispatch_worktree_failed', task_id, agent_id, {
+            'from': 'scheduler',
+            'to': agent_id,
+            'newState': new_state,
+            'trigger': trigger,
+            'status': 'worktree-failed',
+            'dispatchId': dispatch_id,
+            'executionIsolation': failed_isolation,
+            'error': err,
+            'remark': '专属 worktree 分配失败，已拦截派发',
+        }, confidence='high', trace_id=trace_id)
+        log.warning(f'⚠️ {task_id} 专属 worktree 分配失败，派发拦截: {err}')
+        return
+
+    if allocated_isolation != execution_isolation:
+        _apply_task_execution_isolation(task, allocated_isolation)
+        _update_task_scheduler(task_id, lambda t, s: (
+            _apply_task_execution_isolation(t, allocated_isolation),
+            _scheduler_add_flow(
+                t,
+                f'专属 worktree 已分配：{allocated_isolation.get("worktreePath", "")}',
+                to=_STATE_LABELS.get(new_state, new_state),
+            )
+        ))
+        _append_runtime_event('dispatch_worktree_allocated', task_id, agent_id, {
+            'from': 'scheduler',
+            'to': agent_id,
+            'newState': new_state,
+            'trigger': trigger,
+            'status': 'worktree-allocated',
+            'dispatchId': dispatch_id,
+            'executionIsolation': allocated_isolation,
+            'worktreePath': allocated_isolation.get('worktreePath', ''),
+            'worktreeBranch': allocated_isolation.get('worktreeBranch', ''),
+            'remark': '专属 worktree 已分配',
+        }, trace_id=trace_id)
+
+    payload = _build_dispatch_payload(task_id, task, new_state, agent_id, trigger)
+    trace_id = payload.get('traceId', trace_id)
+
     updated = _update_task_scheduler(task_id, lambda t, s: (
         t.__setitem__('traceId', trace_id),
+        _apply_task_execution_isolation(t, payload.get('executionIsolation') or allocated_isolation),
         s.update({
             'lastDispatchAt': dispatch_started_at,
             'lastDispatchStatus': 'queued',

@@ -227,6 +227,8 @@ def test_dispatch_uses_opencode_run_attach(monkeypatch, tmp_path):
     }
     tasks_path = data_dir / 'tasks_source.json'
     tasks_path.write_text(json.dumps([task], ensure_ascii=False), encoding='utf-8')
+    worktree_dir = tmp_path / 'task-worktree'
+    worktree_dir.mkdir()
 
     monkeypatch.setenv('EDICT_RUNTIME', 'opencode')
     monkeypatch.setenv('OPENCODE_SERVER_URL', 'http://127.0.0.1:4096')
@@ -236,6 +238,18 @@ def test_dispatch_uses_opencode_run_attach(monkeypatch, tmp_path):
     monkeypatch.setattr(srv, '_resolve_opencode_bin', lambda: '/usr/local/bin/opencode')
     monkeypatch.setattr(srv, '_opencode_session_probe', lambda agent_id='taizi': True)
     monkeypatch.setattr(srv, '_opencode_session_error', lambda session_id: '')
+    monkeypatch.setattr(
+        srv,
+        '_allocate_task_worktree',
+        lambda task_id, isolation: {
+            **isolation,
+            'mode': 'dedicated_worktree',
+            'status': 'active',
+            'worktreePath': str(worktree_dir),
+            'worktreeBranch': 'edict/JJC-20260526-002',
+            'baseHead': 'abc1234',
+        },
+    )
     monkeypatch.setattr(
         srv,
         'save_tasks',
@@ -272,16 +286,18 @@ def test_dispatch_uses_opencode_run_attach(monkeypatch, tmp_path):
 
     opencode_cmd = next(cmd for cmd in captured['cmds'] if cmd[:2] == ['/usr/local/bin/opencode', 'run'])
     assert opencode_cmd[opencode_cmd.index('--attach') + 1] == 'http://127.0.0.1:4096'
-    assert opencode_cmd[opencode_cmd.index('--dir') + 1] == str(ROOT)
+    assert opencode_cmd[opencode_cmd.index('--dir') + 1] == str(worktree_dir)
     assert opencode_cmd[opencode_cmd.index('--agent') + 1] == 'taizi'
     assert '[trc_' in opencode_cmd[opencode_cmd.index('--title') + 1]
     assert captured['envs'][0]['EDICT_TASK_ID'] == task_id
     assert captured['envs'][0]['EDICT_TRACE_ID'].startswith('trc_')
     assert captured['envs'][0]['EDICT_AGENT_ID'] == 'taizi'
-    assert captured['envs'][0]['EDICT_ISOLATION_MODE'] == 'patch_first_shared_worktree'
+    assert captured['envs'][0]['EDICT_ISOLATION_MODE'] == 'dedicated_worktree'
+    assert captured['envs'][0]['EDICT_WORKTREE_PATH'] == str(worktree_dir)
     assert captured['envs'][0]['EDICT_PATCH_FIRST'] == '1'
     assert captured['envs'][0]['EDICT_PATCH_REVIEW_REQUIRED'] == '1'
     assert 'Patch-first 隔离' in opencode_cmd[-1]
+    assert str(worktree_dir) in opencode_cmd[-1]
     assert '审批前禁止 commit、push' in opencode_cmd[-1]
 
     updated = json.loads(tasks_path.read_text(encoding='utf-8'))[0]

@@ -46,6 +46,9 @@ dashboard/dist/
 # Vite cache
 .vite/
 
+# Local task worktrees
+.edict/
+
 # IDE
 .vscode/
 

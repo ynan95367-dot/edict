@@ -840,12 +840,13 @@ function IsolationStrip({ isolation }: { isolation?: ExecutionIsolation }) {
     isolation.requiresPatchReview ? '需要审批' : '',
     isolation.checkpoint ? `Checkpoint ${isolation.checkpoint}` : '',
     isolation.rollback ? `Rollback ${isolation.rollback}` : '',
+    isolation.worktreeBranch ? `Branch ${isolation.worktreeBranch}` : '',
   ].filter(Boolean);
   return (
     <div className={`isolation-strip ${required ? 'required' : 'optional'}`}>
       <span>Isolation</span>
       <b>{isolation.label || isolation.mode}</b>
-      <em>{isolation.reason || '执行隔离策略已随 RunSpec 生成'}</em>
+      <em>{isolation.worktreePath || isolation.reason || '执行隔离策略已随 RunSpec 生成'}</em>
       {!!parts.length && (
         <div className="isolation-tags">
           {parts.map((item) => <span key={item}>{item}</span>)}

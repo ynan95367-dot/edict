@@ -1315,6 +1315,36 @@ def test_preview_run_spec_includes_tool_policy(tmp_path, monkeypatch):
     assert any(item['id'] == 'shell.command' for item in run['capabilityPolicies'])
 
 
+def test_allocate_task_worktree_creates_dedicated_git_worktree(tmp_path, monkeypatch):
+    if not shutil.which('git'):
+        pytest.skip('git not available')
+    import server as srv
+
+    root = tmp_path / 'repo'
+    root.mkdir()
+    subprocess.run(['git', 'init'], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(['git', 'config', 'user.email', 'test@example.com'], cwd=root, check=True)
+    subprocess.run(['git', 'config', 'user.name', 'Test User'], cwd=root, check=True)
+    root.joinpath('app.py').write_text('print("hello")\n', encoding='utf-8')
+    subprocess.run(['git', 'add', 'app.py'], cwd=root, check=True)
+    subprocess.run(['git', 'commit', '-m', 'init'], cwd=root, check=True, capture_output=True, text=True)
+
+    monkeypatch.setattr(srv, 'PROJECT_ROOT', root)
+    isolation = srv._execution_isolation_for_run(['code.workspace'], 'medium', 'coding', 'execute')
+
+    allocated = srv._allocate_task_worktree('JJC-ISO-1', isolation)
+
+    worktree_path = pathlib.Path(allocated['worktreePath'])
+    assert allocated['mode'] == 'dedicated_worktree'
+    assert allocated['previousMode'] == 'patch_first_shared_worktree'
+    assert allocated['status'] == 'active'
+    assert allocated['worktreeBranch'] == 'edict/JJC-ISO-1'
+    assert allocated['requiresPatchReview'] is True
+    assert worktree_path.exists()
+    assert worktree_path.joinpath('.git').exists()
+    assert worktree_path.joinpath('app.py').read_text(encoding='utf-8') == 'print("hello")\n'
+
+
 def test_create_run_spec_creates_task_and_persists_mapping(tmp_path, monkeypatch):
     import server as srv
 
