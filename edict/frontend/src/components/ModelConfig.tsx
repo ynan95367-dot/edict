@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '../store';
-import { api, type AgentConfig } from '../api';
+import { api, type AgentConfig, type ModelHealthAgent, type ModelHealthData } from '../api';
 
 const FALLBACK_MODELS = [
   { id: 'anthropic/claude-sonnet-4-6', l: 'Claude Sonnet 4.6', p: 'Anthropic' },
@@ -26,6 +26,26 @@ const CHANNELS = [
 ];
 
 type ModelOption = { id: string; l: string; p: string };
+
+const STATUS_TEXT: Record<string, string> = {
+  ok: '正常',
+  timeout: '超时',
+  failed: '失败',
+  degraded: '降级',
+  offline: '离线',
+  unknown: '未知',
+};
+
+const statusClass = (status?: string) => {
+  const s = status || 'unknown';
+  if (['ok', 'timeout', 'failed', 'degraded', 'offline'].includes(s)) return s;
+  return 'unknown';
+};
+
+const shortTime = (value?: string) => {
+  if (!value) return '无记录';
+  return value.substring(0, 16).replace('T', ' ');
+};
 
 const labelForModel = (modelId: string) => {
   const raw = modelId.split('/').pop() || modelId;
@@ -74,9 +94,26 @@ export default function ModelConfig() {
   const [statusMap, setStatusMap] = useState<Record<string, { cls: string; text: string }>>({});
   const [channelSel, setChannelSel] = useState('feishu');
   const [channelStatus, setChannelStatus] = useState('');
+  const [health, setHealth] = useState<ModelHealthData | null>(null);
+  const [healthError, setHealthError] = useState('');
+  const [healthLoading, setHealthLoading] = useState(false);
+
+  const loadHealth = async () => {
+    setHealthLoading(true);
+    try {
+      const data = await api.modelHealth();
+      setHealth(data);
+      setHealthError('');
+    } catch {
+      setHealthError('模型健康接口不可达');
+    } finally {
+      setHealthLoading(false);
+    }
+  };
 
   useEffect(() => {
     loadAgentConfig();
+    loadHealth();
   }, [loadAgentConfig]);
 
   useEffect(() => {
@@ -91,6 +128,16 @@ export default function ModelConfig() {
       setChannelSel(agentConfig.dispatchChannel);
     }
   }, [agentConfig]);
+
+  const healthByAgent = useMemo(() => {
+    const map: Record<string, ModelHealthAgent> = {};
+    health?.agents?.forEach((item) => {
+      map[item.agentId] = item;
+    });
+    return map;
+  }, [health]);
+  const summary = health?.summary || {};
+  const unhealthyCount = (summary.timeout || 0) + (summary.failed || 0) + (summary.degraded || 0) + (summary.offline || 0);
 
   if (!agentConfig?.agents) {
     return <div className="empty" style={{ gridColumn: '1/-1' }}>⚠️ 请先启动本地服务器</div>;
@@ -116,7 +163,7 @@ export default function ModelConfig() {
       if (r.ok) {
         setStatusMap((p) => ({ ...p, [agentId]: { cls: 'ok', text: '✅ 已提交，运行时配置刷新中（约5秒）' } }));
         toast(agentId + ' 模型已更改', 'ok');
-        setTimeout(() => loadAgentConfig(), 5500);
+        setTimeout(() => { loadAgentConfig(); loadHealth(); }, 5500);
       } else {
         setStatusMap((p) => ({ ...p, [agentId]: { cls: 'err', text: '❌ ' + (r.error || '错误') } }));
       }
@@ -127,11 +174,90 @@ export default function ModelConfig() {
 
   return (
     <div>
+      <div className="model-health-panel">
+        <div className="mh-head">
+          <div>
+            <div className="sec-title">模型连接状态</div>
+            <div className="mh-sub">
+              {health?.runtimeLabel || '运行时'} 观测面板 · 基于真实派发、超时和 session 错误回写
+            </div>
+          </div>
+          <button className="btn btn-g" onClick={loadHealth} disabled={healthLoading}>
+            {healthLoading ? '刷新中' : '刷新状态'}
+          </button>
+        </div>
+
+        <div className="mh-overview">
+          <div className={`mh-gateway ${health?.gateway?.status || 'unknown'}`}>
+            <span>运行时</span>
+            <b>{health?.gateway?.alive ? (health.gateway.probe ? '可用' : '降级') : '离线'}</b>
+          </div>
+          <div className="mh-stat ok"><span>正常</span><b>{summary.ok || 0}</b></div>
+          <div className="mh-stat timeout"><span>超时</span><b>{summary.timeout || 0}</b></div>
+          <div className="mh-stat failed"><span>失败/降级</span><b>{(summary.failed || 0) + (summary.degraded || 0)}</b></div>
+          <div className="mh-stat unknown"><span>暂无观测</span><b>{summary.unknown || 0}</b></div>
+          <div className={unhealthyCount ? 'mh-risk bad' : 'mh-risk'}>
+            <span>自动替换</span>
+            <b>{health?.failovers?.length || 0}</b>
+          </div>
+        </div>
+
+        {healthError && <div className="mh-error">{healthError}</div>}
+
+        <div className="mh-table">
+          <div className="mh-row mh-row-head">
+            <span>Agent</span>
+            <span>当前模型</span>
+            <span>状态</span>
+            <span>最近证据</span>
+            <span>同级备用</span>
+          </div>
+          {agentConfig.agents.map((ag) => {
+            const h = healthByAgent[ag.id];
+            const cls = statusClass(h?.status);
+            return (
+              <div className="mh-row" key={ag.id}>
+                <div className="mh-agent">
+                  <span className="mh-agent-icon">{ag.emoji || '🏛️'}</span>
+                  <div>
+                    <b>{ag.label}</b>
+                    <small>{ag.id}</small>
+                  </div>
+                </div>
+                <div className="mh-model">
+                  <b>{h?.modelLabel || labelForModel(ag.model)}</b>
+                  <small>{h?.provider || providerForModel(ag.model)} · {h?.tierLabel || '未知等级'}</small>
+                </div>
+                <div>
+                  <span className={`mh-pill ${cls}`}>{h?.statusLabel || STATUS_TEXT.unknown}</span>
+                </div>
+                <div className="mh-evidence">
+                  <b>{h?.lastFailureAt ? shortTime(h.lastFailureAt) : h?.lastSuccessAt ? shortTime(h.lastSuccessAt) : '无记录'}</b>
+                  <small title={h?.lastError || ''}>{h?.lastError || (h?.source === 'config' ? '尚未发生派发观测' : '最近无错误')}</small>
+                </div>
+                <div className="mh-fallback">
+                  {h?.fallbackModel ? (
+                    <>
+                      <b>{h.fallbackLabel || labelForModel(h.fallbackModel)}</b>
+                      <small>{h.fallbackModel}</small>
+                    </>
+                  ) : (
+                    <span>暂无同级备用</span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
       <div className="model-grid">
         {agentConfig.agents.map((ag) => {
           const sel = selMap[ag.id] || ag.model;
           const changed = sel !== ag.model;
           const st = statusMap[ag.id];
+          const h = healthByAgent[ag.id];
+          const cls = statusClass(h?.status);
           return (
             <div className="mc-card" key={ag.id}>
               <div className="mc-top">
@@ -143,9 +269,16 @@ export default function ModelConfig() {
                   </div>
                   <div className="mc-role">{ag.role}</div>
                 </div>
+                <span className={`mh-pill mini ${cls}`}>{h?.statusLabel || '暂无观测'}</span>
               </div>
               <div className="mc-cur">
                 当前: <b>{ag.model}</b>
+              </div>
+              <div className="mc-health-line">
+                <span>{h?.provider || providerForModel(ag.model)}</span>
+                <span>{h?.tierLabel || '未知等级'}</span>
+                <span>失败 {h?.failureCount || 0}</span>
+                <span>超时 {h?.timeoutCount || 0}</span>
               </div>
               <select className="msel" value={sel} onChange={(e) => handleSelect(ag.id, e.target.value)}>
                 {models.map((m) => (

@@ -28,6 +28,7 @@ export const api = {
   // 核心数据
   liveStatus: () => fetchJ<LiveStatus>(`${API_BASE}/api/live-status`),
   agentConfig: () => fetchJ<AgentConfig>(`${API_BASE}/api/agent-config`),
+  modelHealth: () => fetchJ<ModelHealthData>(`${API_BASE}/api/model-health`),
   modelChangeLog: () => fetchJ<ChangeLogEntry[]>(`${API_BASE}/api/model-change-log`).catch(() => []),
   officialsStats: () => fetchJ<OfficialsData>(`${API_BASE}/api/officials-stats`),
   morningBrief: () => fetchJ<MorningBrief>(`${API_BASE}/api/morning-brief`),
@@ -465,6 +466,48 @@ export interface ChangeLogEntry {
   oldModel: string;
   newModel: string;
   rolledBack?: boolean;
+  source?: string;
+  reason?: string;
+  autoFailover?: boolean;
+}
+
+export interface ModelHealthAgent {
+  agentId: string;
+  agentLabel: string;
+  role?: string;
+  emoji?: string;
+  model: string;
+  modelLabel: string;
+  provider: string;
+  tier: string;
+  tierLabel: string;
+  status: 'ok' | 'timeout' | 'failed' | 'degraded' | 'offline' | 'unknown' | string;
+  statusLabel: string;
+  lastError?: string;
+  lastFailureAt?: string;
+  lastSuccessAt?: string;
+  failureCount: number;
+  timeoutCount: number;
+  successCount: number;
+  fallbackModel?: string;
+  fallbackLabel?: string;
+  lastTaskId?: string;
+  lastDispatchId?: string;
+  source?: string;
+}
+
+export interface ModelHealthData {
+  ok: boolean;
+  runtime: string;
+  runtimeLabel: string;
+  generatedAt: string;
+  cooldownSec: number;
+  gateway: { alive: boolean; probe: boolean; status: string };
+  summary: Record<string, number>;
+  agents: ModelHealthAgent[];
+  models: Array<KnownModel & { tier?: string; tierLabel?: string; recentStatus?: string }>;
+  events: Array<Record<string, unknown>>;
+  failovers: Array<Record<string, unknown>>;
 }
 
 export interface OfficialInfo {

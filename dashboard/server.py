@@ -8,6 +8,7 @@ Endpoints:
   GET  /api/live-status        → data/live_status.json
   GET  /api/agent-config       → data/agent_config.json
   POST /api/set-model          → {agentId, model}
+  GET  /api/model-health       → data/model_health.json + runtime observations
   GET  /api/model-change-log   → data/model_change_log.json
   GET  /api/last-result        → data/last_model_change_result.json
 """
@@ -92,6 +93,14 @@ _DISPATCH_WORKER_STARTED_AT = ''
 _DISPATCH_WORKER_HEARTBEAT_AT = ''
 _DISPATCH_WORKER_STOPPED_AT = ''
 _ANSI_RE = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
+_MODEL_FAILURE_COOLDOWN_SEC = int(os.environ.get('EDICT_MODEL_FAILURE_COOLDOWN_SEC', '1800') or 1800)
+_MODEL_TIMEOUT_RE = re.compile(r'(timeout|timed out|deadline|etimedout|超时)', re.I)
+_MODEL_CONNECTIVITY_RE = re.compile(
+    r'(model|provider|upstream|api key|unauthorized|forbidden|not supported|unsupported|'
+    r'invalid model|rate limit|too many requests|overloaded|connection|econn|socket|'
+    r'network|429|500|502|503|504|模型|连接|限流|不可用|失败)',
+    re.I,
+)
 
 
 def _append_runtime_event(kind, task_id='', agent_id='', payload=None, evidence=None, confidence='high', at=None, trace_id='', session_id=''):
@@ -3151,7 +3160,11 @@ def _agent_display_label(agent_id):
 
 def _agent_runtime():
     """Return the active agent runtime: openclaw (default) or opencode."""
-    raw = (os.environ.get('EDICT_AGENT_RUNTIME') or os.environ.get('EDICT_RUNTIME') or 'openclaw').strip().lower()
+    raw = (os.environ.get('EDICT_AGENT_RUNTIME') or os.environ.get('EDICT_RUNTIME') or '').strip().lower()
+    if not raw:
+        cfg = read_json(DATA / 'agent_config.json', {})
+        raw = str(cfg.get('runtime') or '').strip().lower() if isinstance(cfg, dict) else ''
+    raw = raw or 'openclaw'
     normalized = raw.replace('-', '').replace('_', '').replace(' ', '')
     if normalized in ('opencode', 'opencold'):
         return 'opencode'
@@ -3189,6 +3202,561 @@ def _opencode_model(agent_id=''):
         or read_json(BASE.parent / 'opencode.json', {}).get('model', '')
         or 'opencode/deepseek-v4-flash-free'
     )
+
+
+def _agent_config():
+    cfg = read_json(DATA / 'agent_config.json', {})
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _agent_config_agents(cfg=None):
+    cfg = cfg if isinstance(cfg, dict) else _agent_config()
+    agents = cfg.get('agents') if isinstance(cfg.get('agents'), list) else []
+    if agents:
+        return [a for a in agents if isinstance(a, dict)]
+    return [
+        {
+            'id': item.get('id', ''),
+            'label': item.get('label', ''),
+            'role': item.get('role', ''),
+            'emoji': item.get('emoji', ''),
+            'model': cfg.get('defaultModel') or _opencode_model(item.get('id', '')),
+            'defaultModel': cfg.get('defaultModel') or _opencode_model(''),
+        }
+        for item in _AGENT_DEPTS
+    ]
+
+
+def _known_model_entries(cfg=None):
+    cfg = cfg if isinstance(cfg, dict) else _agent_config()
+    known = []
+    seen = set()
+
+    def add(model_id, label='', provider=''):
+        model_id = str(model_id or '').strip()
+        if not model_id or model_id in seen:
+            return
+        seen.add(model_id)
+        known.append({
+            'id': model_id,
+            'label': label or _model_label(model_id, []),
+            'provider': provider or _model_provider(model_id, []),
+        })
+
+    for entry in cfg.get('knownModels') or []:
+        if isinstance(entry, dict):
+            add(entry.get('id') or entry.get('name'), entry.get('label') or entry.get('name'), entry.get('provider'))
+        elif isinstance(entry, str):
+            add(entry)
+    add(cfg.get('defaultModel'))
+    for ag in _agent_config_agents(cfg):
+        add(ag.get('model'))
+        add(ag.get('defaultModel'))
+    for entry in (
+        'opencode/deepseek-v4-flash-free',
+        'opencode/big-pickle',
+        'opencode/mimo-v2.5-free',
+        'opencode/nemotron-3-super-free',
+    ):
+        add(entry)
+    return known
+
+
+def _model_provider(model_id, known=None):
+    model_id = str(model_id or '').strip()
+    for entry in known or []:
+        if isinstance(entry, dict) and entry.get('id') == model_id and entry.get('provider'):
+            return str(entry.get('provider'))
+    prefix = model_id.split('/', 1)[0] if '/' in model_id else ''
+    return {
+        'opencode': 'OpenCode',
+        'github-copilot': 'GitHub Copilot',
+        'copilot': 'Copilot',
+        'anthropic': 'Anthropic',
+        'openai': 'OpenAI',
+        'openai-codex': 'OpenAI Codex',
+        'google': 'Google',
+    }.get(prefix, prefix or 'Custom')
+
+
+def _model_auth_family(model_id, provider=''):
+    prefix = str(model_id or '').split('/', 1)[0].lower() if '/' in str(model_id or '') else ''
+    provider_norm = str(provider or '').lower().replace(' ', '-')
+    raw = prefix or provider_norm
+    if raw in {'github-copilot', 'copilot', 'copilot-proxy'} or 'copilot' in provider_norm:
+        return 'copilot'
+    if raw in {'openai', 'openai-codex'} or 'openai' in provider_norm:
+        return 'openai'
+    if raw in {'anthropic'} or 'anthropic' in provider_norm:
+        return 'anthropic'
+    if raw in {'google'} or 'google' in provider_norm:
+        return 'google'
+    if raw in {'opencode'} or 'opencode' in provider_norm:
+        return 'opencode'
+    return raw or 'custom'
+
+
+def _model_label(model_id, known=None):
+    model_id = str(model_id or '').strip()
+    for entry in known or []:
+        if isinstance(entry, dict) and entry.get('id') == model_id and entry.get('label'):
+            return str(entry.get('label'))
+    raw = model_id.split('/', 1)[-1] if '/' in model_id else model_id
+    return re.sub(r'[-_]+', ' ', raw).strip().title() or model_id
+
+
+def _model_tier(model_id):
+    mid = str(model_id or '').lower()
+    if not mid:
+        return 'unknown'
+    if 'free' in mid:
+        return 'free'
+    if any(token in mid for token in ('opus', 'gpt-5', 'gpt5', 'o3', 'o4', 'pro', 'codex', '4.5', '4.6')):
+        return 'frontier'
+    if any(token in mid for token in ('sonnet', 'gpt-4', 'gpt4', 'gemini-2.5', 'deepseek-v4', 'deepseek')):
+        return 'standard'
+    if any(token in mid for token in ('mini', 'flash', 'haiku', 'mimo', 'nemotron', 'small', 'fast')):
+        return 'fast'
+    return 'standard'
+
+
+def _model_tier_label(tier):
+    return {
+        'frontier': '前沿/高阶',
+        'standard': '标准主力',
+        'fast': '快速/轻量',
+        'free': '免费/兜底',
+    }.get(tier or '', '未知')
+
+
+def _agent_current_model(agent_id):
+    cfg = _agent_config()
+    for ag in _agent_config_agents(cfg):
+        if ag.get('id') == agent_id and ag.get('model'):
+            return str(ag.get('model')).strip()
+    if _agent_runtime() == 'opencode':
+        return _opencode_model(agent_id)
+    return str(cfg.get('defaultModel') or '').strip()
+
+
+def _model_health_file():
+    return DATA / 'model_health.json'
+
+
+def _empty_model_health():
+    return {'version': 1, 'updatedAt': now_iso(), 'records': {}, 'events': [], 'failovers': []}
+
+
+def _read_model_health():
+    data = atomic_json_read(_model_health_file(), _empty_model_health())
+    if not isinstance(data, dict):
+        data = _empty_model_health()
+    data.setdefault('version', 1)
+    data.setdefault('updatedAt', now_iso())
+    data.setdefault('records', {})
+    data.setdefault('events', [])
+    data.setdefault('failovers', [])
+    if not isinstance(data.get('records'), dict):
+        data['records'] = {}
+    if not isinstance(data.get('events'), list):
+        data['events'] = []
+    if not isinstance(data.get('failovers'), list):
+        data['failovers'] = []
+    return data
+
+
+def _model_health_key(agent_id, model_id):
+    return f'{agent_id}::{model_id}'
+
+
+def _normalize_model_status(status, error=''):
+    raw = str(status or '').lower()
+    text = str(error or '')
+    if raw == 'ok' or raw == 'success':
+        return 'ok'
+    if raw == 'timeout' or _MODEL_TIMEOUT_RE.search(text):
+        return 'timeout'
+    if raw in {'degraded', 'rate-limited'}:
+        return 'degraded'
+    if raw in {'failed', 'error', 'agent-error'}:
+        return 'failed'
+    return raw or 'unknown'
+
+
+def _model_status_label(status):
+    return {
+        'ok': '连接正常',
+        'timeout': '连接超时',
+        'failed': '调用失败',
+        'degraded': '性能降级',
+        'offline': '运行时离线',
+        'unknown': '暂无观测',
+    }.get(status or '', status or '未知')
+
+
+def _is_model_failure_candidate(status, error=''):
+    normalized = _normalize_model_status(status, error)
+    if normalized == 'timeout':
+        return True
+    if normalized not in {'failed', 'degraded'}:
+        return False
+    return bool(_MODEL_CONNECTIVITY_RE.search(str(error or '')))
+
+
+def _recent_model_record_status(model_id, health=None):
+    health = health or _read_model_health()
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+    worst = ''
+    worst_rank = {'timeout': 4, 'failed': 3, 'degraded': 2, 'ok': 1, 'unknown': 0}
+    for rec in (health.get('records') or {}).values():
+        if not isinstance(rec, dict) or rec.get('model') != model_id:
+            continue
+        age = _iso_age(rec.get('lastFailureAt') or rec.get('updatedAt'), now_dt=now_dt)
+        if age is not None and age > _MODEL_FAILURE_COOLDOWN_SEC:
+            continue
+        status = rec.get('status') or 'unknown'
+        if worst_rank.get(status, 0) > worst_rank.get(worst, 0):
+            worst = status
+    return worst
+
+
+def _same_tier_fallback_model(agent_id, failed_model, failure_status='failed'):
+    cfg = _agent_config()
+    known = _known_model_entries(cfg)
+    failed_model = str(failed_model or '').strip()
+    failed_tier = _model_tier(failed_model)
+    failed_provider = _model_provider(failed_model, known)
+    failed_family = _model_auth_family(failed_model, failed_provider)
+    health = _read_model_health()
+    candidates = []
+    for entry in known:
+        model_id = entry.get('id') if isinstance(entry, dict) else ''
+        if not model_id or model_id == failed_model:
+            continue
+        if _model_tier(model_id) != failed_tier:
+            continue
+        recent_status = _recent_model_record_status(model_id, health)
+        if recent_status in {'timeout', 'failed'}:
+            continue
+        provider = _model_provider(model_id, known)
+        family_penalty = 0 if _model_auth_family(model_id, provider) == failed_family else 1
+        provider_penalty = 0 if provider == failed_provider else 1
+        health_penalty = 0 if recent_status in {'', 'ok', 'unknown'} else 1
+        candidates.append((health_penalty, family_penalty, provider_penalty, _model_label(model_id, known), model_id))
+    if not candidates:
+        return ''
+    candidates.sort()
+    return candidates[0][4]
+
+
+def _append_model_change_log(entry):
+    def _update(items):
+        items = items if isinstance(items, list) else []
+        items.append(entry)
+        return items[-300:]
+
+    return atomic_json_update(DATA / 'model_change_log.json', _update, [])
+
+
+def _apply_agent_model_immediate(agent_id, new_model, *, reason='', source='auto-failover', old_model=''):
+    old = {'value': old_model or _agent_current_model(agent_id)}
+
+    def _update_dashboard(cfg):
+        cfg = cfg if isinstance(cfg, dict) else {}
+        agents = cfg.get('agents') if isinstance(cfg.get('agents'), list) else []
+        found = False
+        for ag in agents:
+            if isinstance(ag, dict) and ag.get('id') == agent_id:
+                old['value'] = old['value'] or str(ag.get('model') or cfg.get('defaultModel') or '')
+                ag['model'] = new_model
+                ag['lastAutoModelChange'] = {'at': now_iso(), 'source': source, 'reason': reason}
+                found = True
+                break
+        if not found:
+            meta = next((d for d in _AGENT_DEPTS if d.get('id') == agent_id), {'id': agent_id, 'label': agent_id, 'role': '', 'emoji': ''})
+            agents.append({
+                'id': agent_id,
+                'label': meta.get('label', agent_id),
+                'role': meta.get('role', ''),
+                'emoji': meta.get('emoji', ''),
+                'model': new_model,
+                'defaultModel': cfg.get('defaultModel') or new_model,
+            })
+        cfg['agents'] = agents
+        cfg['updatedAt'] = now_iso()
+        cfg['lastAutoModelChange'] = {'at': now_iso(), 'agentId': agent_id, 'oldModel': old['value'], 'newModel': new_model, 'source': source, 'reason': reason}
+        return cfg
+
+    atomic_json_update(DATA / 'agent_config.json', _update_dashboard, {})
+
+    if _agent_runtime() == 'opencode':
+        ocfg_path = BASE.parent / 'opencode.json'
+
+        def _update_opencode(cfg):
+            cfg = cfg if isinstance(cfg, dict) else {}
+            agents = cfg.get('agent') if isinstance(cfg.get('agent'), dict) else {}
+            entry = agents.get(agent_id) if isinstance(agents.get(agent_id), dict) else {}
+            old['value'] = old['value'] or str(entry.get('model') or cfg.get('model') or '')
+            entry['model'] = new_model
+            agents[agent_id] = entry
+            cfg['agent'] = agents
+            if not cfg.get('model'):
+                cfg['model'] = new_model
+            return cfg
+
+        atomic_json_update(ocfg_path, _update_opencode, {})
+
+    change = {
+        'at': now_iso(),
+        'runtime': _agent_runtime(),
+        'agentId': agent_id,
+        'oldModel': old['value'],
+        'newModel': new_model,
+        'source': source,
+        'reason': reason,
+        'autoFailover': True,
+    }
+    _append_model_change_log(change)
+    return change
+
+
+def _record_model_health(agent_id, model_id, status, *, error='', task_id='', trace_id='', dispatch_id='', session_id='', fallback_model=''):
+    agent_id = str(agent_id or '').strip()
+    model_id = str(model_id or '').strip()
+    if not agent_id or not model_id:
+        return {}
+    normalized = _normalize_model_status(status, error)
+    at = now_iso()
+    key = _model_health_key(agent_id, model_id)
+    event = {
+        'at': at,
+        'agentId': agent_id,
+        'model': model_id,
+        'status': normalized,
+        'error': _clean_runtime_error(error, limit=500),
+        'taskId': task_id,
+        'traceId': trace_id,
+        'dispatchId': dispatch_id,
+        'sessionId': session_id,
+        'fallbackModel': fallback_model,
+    }
+
+    def _update(data):
+        data = data if isinstance(data, dict) else _empty_model_health()
+        records = data.get('records') if isinstance(data.get('records'), dict) else {}
+        rec = records.get(key) if isinstance(records.get(key), dict) else {}
+        rec.update({
+            'agentId': agent_id,
+            'model': model_id,
+            'status': normalized,
+            'statusLabel': _model_status_label(normalized),
+            'updatedAt': at,
+            'lastTaskId': task_id,
+            'lastTraceId': trace_id,
+            'lastDispatchId': dispatch_id,
+            'lastSessionId': session_id,
+        })
+        if normalized == 'ok':
+            rec['lastSuccessAt'] = at
+            rec['successCount'] = int(rec.get('successCount') or 0) + 1
+            rec['lastError'] = ''
+        else:
+            rec['lastFailureAt'] = at
+            rec['lastError'] = event['error']
+            rec['failureCount'] = int(rec.get('failureCount') or 0) + 1
+            if normalized == 'timeout':
+                rec['timeoutCount'] = int(rec.get('timeoutCount') or 0) + 1
+        if fallback_model:
+            rec['fallbackModel'] = fallback_model
+        records[key] = rec
+        events = data.get('events') if isinstance(data.get('events'), list) else []
+        events.append(event)
+        data.update({'version': 1, 'updatedAt': at, 'records': records, 'events': events[-500:]})
+        return data
+
+    updated = atomic_json_update(_model_health_file(), _update, _empty_model_health())
+    rec = (updated.get('records') or {}).get(key, {}) if isinstance(updated, dict) else {}
+    _append_runtime_event('model_health_updated', task_id, agent_id, {
+        'from': _runtime_label(),
+        'to': agent_id,
+        'model': model_id,
+        'status': normalized,
+        'statusLabel': _model_status_label(normalized),
+        'error': event['error'],
+        'dispatchId': dispatch_id,
+        'fallbackModel': fallback_model,
+        'remark': f'模型状态更新：{_model_label(model_id)} {_model_status_label(normalized)}',
+    }, confidence='medium' if normalized == 'unknown' else 'high', trace_id=trace_id, session_id=session_id)
+    return rec
+
+
+def _record_model_failover(agent_id, old_model, new_model, *, reason='', task_id='', trace_id='', dispatch_id=''):
+    at = now_iso()
+    entry = {
+        'at': at,
+        'agentId': agent_id,
+        'oldModel': old_model,
+        'newModel': new_model,
+        'reason': _clean_runtime_error(reason, limit=500),
+        'taskId': task_id,
+        'traceId': trace_id,
+        'dispatchId': dispatch_id,
+        'runtime': _agent_runtime(),
+    }
+
+    def _update(data):
+        data = data if isinstance(data, dict) else _empty_model_health()
+        failovers = data.get('failovers') if isinstance(data.get('failovers'), list) else []
+        failovers.append(entry)
+        data['failovers'] = failovers[-200:]
+        data['updatedAt'] = at
+        return data
+
+    atomic_json_update(_model_health_file(), _update, _empty_model_health())
+    _append_runtime_event('model_failover_applied', task_id, agent_id, {
+        'from': _runtime_label(),
+        'to': agent_id,
+        'oldModel': old_model,
+        'newModel': new_model,
+        'reason': entry['reason'],
+        'dispatchId': dispatch_id,
+        'remark': f'模型自动替换：{_model_label(old_model)} -> {_model_label(new_model)}',
+    }, confidence='high', trace_id=trace_id)
+    return entry
+
+
+def _maybe_apply_model_failover(agent_id, model_id, status, error='', *, task_id='', trace_id='', dispatch_id=''):
+    if not _is_model_failure_candidate(status, error):
+        return ''
+    if _agent_current_model(agent_id) != model_id:
+        return ''
+    normalized = _normalize_model_status(status, error)
+    fallback = _same_tier_fallback_model(agent_id, model_id, normalized)
+    if not fallback:
+        return ''
+    _apply_agent_model_immediate(
+        agent_id,
+        fallback,
+        old_model=model_id,
+        source='auto-failover',
+        reason=f'{_model_status_label(normalized)}: {_clean_runtime_error(error, limit=200)}',
+    )
+    _record_model_failover(agent_id, model_id, fallback, reason=error, task_id=task_id, trace_id=trace_id, dispatch_id=dispatch_id)
+    return fallback
+
+
+def _latest_outbox_model_signal(agent_id, model_id=''):
+    try:
+        items = _outbox_list(limit=300)
+    except Exception:
+        return {}
+    matches = []
+    for item in items:
+        if item.get('kind') != 'dispatch' or item.get('agentId') != agent_id:
+            continue
+        payload = item.get('payload') if isinstance(item.get('payload'), dict) else {}
+        payload_model = payload.get('model') or ''
+        if model_id and payload_model and payload_model != model_id:
+            continue
+        matches.append(item)
+    matches.sort(key=lambda x: x.get('updatedAt') or x.get('createdAt') or '', reverse=True)
+    for item in matches[:10]:
+        status = item.get('status')
+        result = item.get('result') if isinstance(item.get('result'), dict) else {}
+        error = item.get('error') or result.get('error') or ''
+        if status == 'failed':
+            return {
+                'status': _normalize_model_status(result.get('status') or status, error),
+                'lastError': _clean_runtime_error(error, limit=500),
+                'lastFailureAt': item.get('updatedAt') or item.get('createdAt') or '',
+                'lastTaskId': item.get('taskId') or '',
+                'lastDispatchId': item.get('id') or '',
+                'source': 'runtime_outbox',
+            }
+        if status in {'done', 'running', 'pending'}:
+            break
+    return {}
+
+
+def get_model_health():
+    cfg = _agent_config()
+    known = _known_model_entries(cfg)
+    health = _read_model_health()
+    records = health.get('records') or {}
+    runtime = _agent_runtime()
+    gateway_alive = _check_gateway_alive()
+    gateway_probe = _check_gateway_probe() if gateway_alive else False
+    agents = []
+    summary = {'ok': 0, 'timeout': 0, 'failed': 0, 'degraded': 0, 'offline': 0, 'unknown': 0}
+
+    for ag in _agent_config_agents(cfg):
+        agent_id = str(ag.get('id') or '').strip()
+        if not agent_id:
+            continue
+        model_id = str(ag.get('model') or ag.get('defaultModel') or cfg.get('defaultModel') or '').strip()
+        key = _model_health_key(agent_id, model_id)
+        rec = records.get(key) if isinstance(records.get(key), dict) else {}
+        outbox_signal = {} if rec else _latest_outbox_model_signal(agent_id, model_id)
+        status = rec.get('status') or outbox_signal.get('status') or 'unknown'
+        if not gateway_alive:
+            status = 'offline'
+        elif status in {'failed', 'timeout', 'degraded'}:
+            age = _iso_age(rec.get('lastFailureAt') or outbox_signal.get('lastFailureAt'))
+            if age is not None and age > _MODEL_FAILURE_COOLDOWN_SEC:
+                status = 'unknown'
+        summary[status if status in summary else 'unknown'] += 1
+        tier = _model_tier(model_id)
+        fallback = _same_tier_fallback_model(agent_id, model_id, status) if model_id else ''
+        agents.append({
+            'agentId': agent_id,
+            'agentLabel': ag.get('label') or _agent_display_label(agent_id),
+            'role': ag.get('role') or '',
+            'emoji': ag.get('emoji') or '',
+            'model': model_id,
+            'modelLabel': _model_label(model_id, known),
+            'provider': _model_provider(model_id, known),
+            'tier': tier,
+            'tierLabel': _model_tier_label(tier),
+            'status': status,
+            'statusLabel': _model_status_label(status),
+            'lastError': rec.get('lastError') or outbox_signal.get('lastError') or '',
+            'lastFailureAt': rec.get('lastFailureAt') or outbox_signal.get('lastFailureAt') or '',
+            'lastSuccessAt': rec.get('lastSuccessAt') or '',
+            'failureCount': int(rec.get('failureCount') or (1 if outbox_signal else 0)),
+            'timeoutCount': int(rec.get('timeoutCount') or 0),
+            'successCount': int(rec.get('successCount') or 0),
+            'fallbackModel': rec.get('fallbackModel') or fallback,
+            'fallbackLabel': _model_label(rec.get('fallbackModel') or fallback, known) if (rec.get('fallbackModel') or fallback) else '',
+            'lastTaskId': rec.get('lastTaskId') or outbox_signal.get('lastTaskId') or '',
+            'lastDispatchId': rec.get('lastDispatchId') or outbox_signal.get('lastDispatchId') or '',
+            'source': 'model_health' if rec else (outbox_signal.get('source') or 'config'),
+        })
+
+    return {
+        'ok': True,
+        'runtime': runtime,
+        'runtimeLabel': _runtime_label(),
+        'generatedAt': now_iso(),
+        'cooldownSec': _MODEL_FAILURE_COOLDOWN_SEC,
+        'gateway': {
+            'alive': gateway_alive,
+            'probe': gateway_probe,
+            'status': 'ok' if gateway_probe else ('degraded' if gateway_alive else 'offline'),
+        },
+        'summary': summary,
+        'agents': agents,
+        'models': [
+            {
+                **entry,
+                'tier': _model_tier(entry.get('id')),
+                'tierLabel': _model_tier_label(_model_tier(entry.get('id'))),
+                'recentStatus': _recent_model_record_status(entry.get('id'), health) or 'unknown',
+            }
+            for entry in known
+        ],
+        'events': (health.get('events') or [])[-80:],
+        'failovers': (health.get('failovers') or [])[-50:],
+    }
 
 
 def _resolve_opencode_bin():
@@ -6726,6 +7294,7 @@ def _build_dispatch_payload(task_id, task, new_state, agent_id, trigger):
     trace_id = _ensure_trace_id(task)
     execution_isolation = _task_execution_isolation(task)
     isolation_text = _dispatch_isolation_instructions(execution_isolation)
+    model_id = _agent_current_model(agent_id)
     msgs = {
         'taizi': (
             f'📜 皇上旨意需要你处理\n'
@@ -6795,6 +7364,8 @@ def _build_dispatch_payload(task_id, task, new_state, agent_id, trigger):
         'targetDept': target_dept,
         'traceId': trace_id,
         'executionIsolation': execution_isolation,
+        'model': model_id,
+        'modelTier': _model_tier(model_id),
     }
 
 
@@ -6888,6 +7459,7 @@ def _execute_dispatch_outbox_item(item):
     title = payload.get('title') or task.get('title', '(无标题)')
     dispatch_payload = _build_dispatch_payload(task_id, task, new_state, agent_id, trigger)
     msg = payload.get('message') or dispatch_payload['message']
+    model_id = payload.get('model') or dispatch_payload.get('model') or _agent_current_model(agent_id)
     execution_isolation = payload.get('executionIsolation') or dispatch_payload.get('executionIsolation') or _task_execution_isolation(task)
     dispatch_dir = pathlib.Path(execution_isolation.get('worktreePath') or PROJECT_ROOT).resolve()
     if not dispatch_dir.exists():
@@ -6909,6 +7481,8 @@ def _execute_dispatch_outbox_item(item):
         'EDICT_ROLLBACK_POLICY': str(execution_isolation.get('rollback', '')),
         'EDICT_PROJECT_ROOT': str(PROJECT_ROOT.resolve()),
         'EDICT_WORKTREE_PATH': str(dispatch_dir),
+        'EDICT_MODEL_ID': str(model_id or ''),
+        'EDICT_MODEL_TIER': _model_tier(model_id),
     })
 
     def _update_if_current(status, error='', session_id='', flow_remark=''):
@@ -7039,9 +7613,8 @@ def _execute_dispatch_outbox_item(item):
                 '--format', 'json',
                 '--title', f'{task_id} [{trace_id}] {title}'[:120],
             ]
-            model = _opencode_model(agent_id)
-            if model:
-                cmd.extend(['--model', model])
+            if model_id:
+                cmd.extend(['--model', model_id])
             cmd.append(msg)
             if not _opencode_session_probe(agent_id):
                 err = 'OpenCode session probe failed before dispatch'
@@ -7142,8 +7715,39 @@ def _execute_dispatch_outbox_item(item):
                         import time
                         time.sleep(5)
                         continue
+                    if runtime == 'opencode':
+                        fallback_model = _maybe_apply_model_failover(
+                            agent_id,
+                            model_id,
+                            session_failure_status,
+                            err,
+                            task_id=task_id,
+                            trace_id=trace_id,
+                            dispatch_id=dispatch_id,
+                        )
+                        _record_model_health(
+                            agent_id,
+                            model_id,
+                            session_failure_status,
+                            error=err,
+                            task_id=task_id,
+                            trace_id=trace_id,
+                            dispatch_id=dispatch_id,
+                            session_id=session_id,
+                            fallback_model=fallback_model,
+                        )
                     break
                 log.info(f'✅ {task_id} 自动派发成功 → {agent_id}')
+                if runtime == 'opencode':
+                    _record_model_health(
+                        agent_id,
+                        model_id,
+                        'ok',
+                        task_id=task_id,
+                        trace_id=trace_id,
+                        dispatch_id=dispatch_id,
+                        session_id=session_id,
+                    )
                 if _update_if_current(
                     'success',
                     session_id=session_id,
@@ -7189,6 +7793,26 @@ def _execute_dispatch_outbox_item(item):
                 import time
                 time.sleep(5)
         log.error(f'❌ {task_id} 自动派发最终失败 → {agent_id}')
+        if runtime == 'opencode' and final_status != 'opencode-session-stale':
+            fallback_model = _maybe_apply_model_failover(
+                agent_id,
+                model_id,
+                final_status,
+                err,
+                task_id=task_id,
+                trace_id=trace_id,
+                dispatch_id=dispatch_id,
+            )
+            _record_model_health(
+                agent_id,
+                model_id,
+                final_status,
+                error=err,
+                task_id=task_id,
+                trace_id=trace_id,
+                dispatch_id=dispatch_id,
+                fallback_model=fallback_model,
+            )
         _update_if_current(
             final_status,
             error=err,
@@ -7211,6 +7835,26 @@ def _execute_dispatch_outbox_item(item):
             limit=300,
         )
         log.error(f'❌ {task_id} 自动派发超时 → {agent_id}')
+        if runtime == 'opencode':
+            fallback_model = _maybe_apply_model_failover(
+                agent_id,
+                model_id,
+                'timeout',
+                timeout_error,
+                task_id=task_id,
+                trace_id=trace_id,
+                dispatch_id=dispatch_id,
+            )
+            _record_model_health(
+                agent_id,
+                model_id,
+                'timeout',
+                error=timeout_error,
+                task_id=task_id,
+                trace_id=trace_id,
+                dispatch_id=dispatch_id,
+                fallback_model=fallback_model,
+            )
         _update_if_current(
             'timeout',
             error=timeout_error,
@@ -7583,6 +8227,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(read_json(task_data_dir / 'live_status.json'))
         elif p == '/api/agent-config':
             self.send_json(read_json(DATA / 'agent_config.json'))
+        elif p == '/api/model-health':
+            self.send_json(get_model_health())
         elif p == '/api/capabilities':
             self.send_json(list_capabilities())
         elif p == '/api/run-specs':
