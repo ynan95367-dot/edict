@@ -1,6 +1,13 @@
-import { useEffect, useMemo, useState } from 'react';
+import { type FormEvent, useEffect, useMemo, useState } from 'react';
 import { useStore } from '../store';
-import { api, type AgentConfig, type ModelHealthAgent, type ModelHealthData } from '../api';
+import {
+  api,
+  type AgentConfig,
+  type ModelHealthAgent,
+  type ModelHealthData,
+  type ModelRegistryData,
+  type ModelRegistryEntry,
+} from '../api';
 
 const FALLBACK_MODELS = [
   { id: 'anthropic/claude-sonnet-4-6', l: 'Claude Sonnet 4.6', p: 'Anthropic' },
@@ -25,7 +32,7 @@ const CHANNELS = [
   { id: 'tui', label: 'TUI (终端)' },
 ];
 
-type ModelOption = { id: string; l: string; p: string };
+type ModelOption = { id: string; l: string; p: string; latencyMs?: number | null; status?: string; source?: string };
 
 const STATUS_TEXT: Record<string, string> = {
   ok: '正常',
@@ -60,12 +67,30 @@ const providerForModel = (modelId: string) => {
     opencode: 'OpenCode',
     'github-copilot': 'GitHub Copilot',
     copilot: 'Copilot',
+    'moonshotai-cn': 'Moonshot AI (China)',
+    moonshot: 'Moonshot AI',
     anthropic: 'Anthropic',
     openai: 'OpenAI',
     'openai-codex': 'OpenAI Codex',
     google: 'Google',
   };
   return names[provider] || provider || 'Custom';
+};
+
+const sourceLabel = (source?: string) => {
+  const labels: Record<string, string> = {
+    'opencode-cli': 'CLI',
+    'opencode-server': 'Server',
+    'agent-config': 'Agent',
+    'manual-api': 'Manual',
+  };
+  return labels[source || ''] || source || 'unknown';
+};
+
+const formatLatency = (value?: number | null) => {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '未观测';
+  if (value < 1000) return `${Math.round(value)}ms`;
+  return `${(value / 1000).toFixed(value < 10000 ? 1 : 0)}s`;
 };
 
 const buildModelOptions = (agentConfig: AgentConfig) => {
@@ -84,6 +109,33 @@ const buildModelOptions = (agentConfig: AgentConfig) => {
   return options;
 };
 
+const buildRegistryOptions = (registry: ModelRegistryData | null, agentConfig: AgentConfig | null) => {
+  const base: ModelOption[] = registry?.models?.length
+    ? registry.models.map((m) => ({
+      id: m.id,
+      l: m.label || labelForModel(m.id),
+      p: m.provider || providerForModel(m.id),
+      latencyMs: m.latencyMs,
+      status: m.recentStatus,
+      source: m.source,
+    }))
+    : agentConfig
+      ? buildModelOptions(agentConfig)
+      : FALLBACK_MODELS;
+  const seen = new Set<string>();
+  const options: ModelOption[] = [];
+  const add = (entry: ModelOption) => {
+    if (!entry.id || seen.has(entry.id)) return;
+    seen.add(entry.id);
+    options.push(entry);
+  };
+  base.forEach(add);
+  agentConfig?.agents?.forEach((ag) => add({ id: ag.model, l: labelForModel(ag.model), p: providerForModel(ag.model) }));
+  agentConfig?.agents?.forEach((ag) => add({ id: ag.defaultModel || '', l: labelForModel(ag.defaultModel || ''), p: providerForModel(ag.defaultModel || '') }));
+  if (agentConfig?.defaultModel) add({ id: agentConfig.defaultModel, l: labelForModel(agentConfig.defaultModel), p: providerForModel(agentConfig.defaultModel) });
+  return options;
+};
+
 export default function ModelConfig() {
   const agentConfig = useStore((s) => s.agentConfig);
   const changeLog = useStore((s) => s.changeLog);
@@ -97,6 +149,19 @@ export default function ModelConfig() {
   const [health, setHealth] = useState<ModelHealthData | null>(null);
   const [healthError, setHealthError] = useState('');
   const [healthLoading, setHealthLoading] = useState(false);
+  const [registry, setRegistry] = useState<ModelRegistryData | null>(null);
+  const [registryError, setRegistryError] = useState('');
+  const [registryLoading, setRegistryLoading] = useState(false);
+  const [customModel, setCustomModel] = useState({
+    providerId: 'openrouter',
+    providerName: 'OpenRouter',
+    modelId: '',
+    label: '',
+    apiType: 'openai',
+    baseURL: '',
+    apiKey: '',
+  });
+  const [customStatus, setCustomStatus] = useState('');
 
   const loadHealth = async () => {
     setHealthLoading(true);
@@ -111,9 +176,27 @@ export default function ModelConfig() {
     }
   };
 
+  const loadRegistry = async (refresh = false) => {
+    setRegistryLoading(true);
+    try {
+      const data = refresh ? await api.refreshModelRegistry() : await api.modelRegistry();
+      setRegistry(data);
+      setRegistryError(data.errors?.length ? data.errors.join('；') : '');
+      if (refresh) {
+        await loadAgentConfig();
+        await loadHealth();
+      }
+    } catch {
+      setRegistryError('模型注册表接口不可达');
+    } finally {
+      setRegistryLoading(false);
+    }
+  };
+
   useEffect(() => {
     loadAgentConfig();
     loadHealth();
+    loadRegistry(false);
   }, [loadAgentConfig]);
 
   useEffect(() => {
@@ -138,15 +221,58 @@ export default function ModelConfig() {
   }, [health]);
   const summary = health?.summary || {};
   const unhealthyCount = (summary.timeout || 0) + (summary.failed || 0) + (summary.degraded || 0) + (summary.offline || 0);
+  const models = useMemo(() => buildRegistryOptions(registry, agentConfig), [registry, agentConfig]);
+  const registryById = useMemo(() => {
+    const map: Record<string, ModelRegistryEntry> = {};
+    registry?.models?.forEach((item) => {
+      map[item.id] = item;
+    });
+    return map;
+  }, [registry]);
+  const visibleRegistryModels = useMemo(() => {
+    const items = [...(registry?.models || [])];
+    return items.sort((a, b) => {
+      const al = typeof a.latencyMs === 'number' ? a.latencyMs : Number.MAX_SAFE_INTEGER;
+      const bl = typeof b.latencyMs === 'number' ? b.latencyMs : Number.MAX_SAFE_INTEGER;
+      if (al !== bl) return al - bl;
+      return `${a.provider || ''}${a.label || a.id}`.localeCompare(`${b.provider || ''}${b.label || b.id}`);
+    });
+  }, [registry]);
 
   if (!agentConfig?.agents) {
     return <div className="empty" style={{ gridColumn: '1/-1' }}>⚠️ 请先启动本地服务器</div>;
   }
 
-  const models = buildModelOptions(agentConfig);
-
   const handleSelect = (agentId: string, val: string) => {
     setSelMap((p) => ({ ...p, [agentId]: val }));
+  };
+
+  const refreshRegistry = async () => {
+    await loadRegistry(true);
+    toast('OpenCode 模型已同步', 'ok');
+  };
+
+  const updateCustom = (key: keyof typeof customModel, value: string) => {
+    setCustomModel((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const submitCustom = async (event: FormEvent) => {
+    event.preventDefault();
+    setCustomStatus('保存中');
+    try {
+      const result = await api.addCustomModel(customModel);
+      if (result.ok) {
+        if (result.registry) setRegistry(result.registry);
+        setCustomStatus(result.restartRequired ? '已保存，重启 OpenCode 后生效' : '已保存');
+        setCustomModel((prev) => ({ ...prev, modelId: '', label: '', apiKey: '' }));
+        toast('手动 API 模型已加入列表', 'ok');
+        await loadAgentConfig();
+      } else {
+        setCustomStatus(result.error || '保存失败');
+      }
+    } catch {
+      setCustomStatus('无法连接服务器');
+    }
   };
 
   const resetMC = (agentId: string) => {
@@ -174,6 +300,135 @@ export default function ModelConfig() {
 
   return (
     <div>
+      <div className="model-registry-panel">
+        <div className="mr-head">
+          <div>
+            <div className="sec-title">模型注册表</div>
+            <div className="mr-sub">
+              OpenCode 实时模型 · 手动 API · 延迟观测统一入口
+            </div>
+          </div>
+          <button className="btn btn-p mr-refresh" onClick={refreshRegistry} disabled={registryLoading}>
+            {registryLoading ? '同步中' : '同步 OpenCode'}
+          </button>
+        </div>
+
+        <div className="mr-kpis">
+          <div className="mr-kpi">
+            <span>可选模型</span>
+            <b>{registry?.summary?.total || models.length}</b>
+          </div>
+          <div className="mr-kpi">
+            <span>已观测延迟</span>
+            <b>{registry?.summary?.measured || 0}</b>
+          </div>
+          <div className="mr-kpi">
+            <span>Provider</span>
+            <b>{Object.keys(registry?.summary?.providers || {}).length}</b>
+          </div>
+          <div className="mr-kpi">
+            <span>最近同步</span>
+            <b>{registry?.generatedAt ? shortTime(registry.generatedAt) : '未同步'}</b>
+          </div>
+        </div>
+
+        <div className="mr-sources">
+          {(registry?.sources || []).map((src) => (
+            <div className={`mr-source ${src.ok ? 'ok' : 'bad'}`} key={src.id}>
+              <span>{src.label}</span>
+              <b>{src.count}</b>
+              <small>{formatLatency(src.latencyMs)}{src.error ? ` · ${src.error}` : ''}</small>
+            </div>
+          ))}
+        </div>
+
+        {registryError && <div className="mh-error">{registryError}</div>}
+
+        <div className="mr-layout">
+          <div className="mr-table">
+            <div className="mr-row mr-row-head">
+              <span>模型</span>
+              <span>来源</span>
+              <span>延迟</span>
+              <span>状态</span>
+            </div>
+            {!visibleRegistryModels.length ? (
+              <div className="mr-empty">暂无模型，点击同步 OpenCode</div>
+            ) : (
+              visibleRegistryModels.map((item) => {
+                const cls = statusClass(item.recentStatus);
+                return (
+                  <div className="mr-row" key={item.id}>
+                    <div className="mr-model">
+                      <b>{item.label || labelForModel(item.id)}</b>
+                      <small>{item.id}</small>
+                    </div>
+                    <div className="mr-source-tags">
+                      {(item.sources?.length ? item.sources : [item.source || 'unknown']).map((src) => (
+                        <span key={src}>{sourceLabel(src)}</span>
+                      ))}
+                    </div>
+                    <div className="mr-latency">
+                      <b>{formatLatency(item.latencyMs)}</b>
+                      <small>{item.latencyLabel || '未观测'}</small>
+                    </div>
+                    <div className="mr-status-cell">
+                      <span className={`mh-pill mini ${cls}`}>{item.statusLabel || STATUS_TEXT.unknown}</span>
+                      <small>{item.provider || providerForModel(item.id)} · {item.tierLabel || '未知等级'}</small>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <form className="mr-custom" onSubmit={submitCustom}>
+            <div className="mr-custom-title">手动 API 模型</div>
+            <div className="mr-form-grid">
+              <label>
+                <span>Provider ID</span>
+                <input value={customModel.providerId} onChange={(e) => updateCustom('providerId', e.target.value)} placeholder="openrouter" />
+              </label>
+              <label>
+                <span>Provider 名称</span>
+                <input value={customModel.providerName} onChange={(e) => updateCustom('providerName', e.target.value)} placeholder="OpenRouter" />
+              </label>
+              <label className="wide">
+                <span>模型 ID</span>
+                <input value={customModel.modelId} onChange={(e) => updateCustom('modelId', e.target.value)} placeholder="anthropic/claude-3.5-sonnet 或 gpt-4.1" />
+              </label>
+              <label>
+                <span>API 类型</span>
+                <select value={customModel.apiType} onChange={(e) => updateCustom('apiType', e.target.value)}>
+                  <option value="openai">OpenAI Compatible</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="google">Google</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
+              <label>
+                <span>显示名</span>
+                <input value={customModel.label} onChange={(e) => updateCustom('label', e.target.value)} placeholder="可留空" />
+              </label>
+              <label className="wide">
+                <span>Base URL</span>
+                <input value={customModel.baseURL} onChange={(e) => updateCustom('baseURL', e.target.value)} placeholder="https://api.openrouter.ai/v1" />
+              </label>
+              <label className="wide">
+                <span>API Key</span>
+                <input type="password" value={customModel.apiKey} onChange={(e) => updateCustom('apiKey', e.target.value)} placeholder="留空则保留已有密钥" />
+              </label>
+            </div>
+            <div className="mr-custom-actions">
+              <button className="btn btn-p" type="submit" disabled={!customModel.modelId.trim()}>
+                保存模型
+              </button>
+              {customStatus && <span>{customStatus}</span>}
+            </div>
+          </form>
+        </div>
+      </div>
+
       <div className="model-health-panel">
         <div className="mh-head">
           <div>
@@ -257,6 +512,7 @@ export default function ModelConfig() {
           const changed = sel !== ag.model;
           const st = statusMap[ag.id];
           const h = healthByAgent[ag.id];
+          const currentRegistry = registryById[ag.model];
           const cls = statusClass(h?.status);
           return (
             <div className="mc-card" key={ag.id}>
@@ -277,13 +533,14 @@ export default function ModelConfig() {
               <div className="mc-health-line">
                 <span>{h?.provider || providerForModel(ag.model)}</span>
                 <span>{h?.tierLabel || '未知等级'}</span>
+                <span>延迟 {formatLatency(currentRegistry?.latencyMs ?? h?.lastLatencyMs)}</span>
                 <span>失败 {h?.failureCount || 0}</span>
                 <span>超时 {h?.timeoutCount || 0}</span>
               </div>
               <select className="msel" value={sel} onChange={(e) => handleSelect(ag.id, e.target.value)}>
                 {models.map((m) => (
                   <option key={m.id} value={m.id}>
-                    {m.l} ({m.p})
+                    {m.l} ({m.p}) · {formatLatency(m.latencyMs)}
                   </option>
                 ))}
               </select>

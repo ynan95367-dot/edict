@@ -166,6 +166,40 @@ def test_discover_opencode_models_uses_configured_bin(tmp_path, monkeypatch):
     assert ids == ["opencode/deepseek-v4-flash-free", "github-copilot/gpt-5.5-fast"]
 
 
+def test_discover_opencode_models_force_refresh_skips_cache(tmp_path, monkeypatch):
+    sync_opencode_agents = _load_sync_opencode_agents()
+    fake_bin = tmp_path / "opencode"
+    fake_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    cache = tmp_path / "model_cache.json"
+    cache.write_text(
+        json.dumps({"generatedAt": 9999999999, "models": [{"id": "opencode/big-pickle"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENCODE_BIN", str(fake_bin))
+    monkeypatch.setenv("OPENCODE_MODEL_REFRESH", "1")
+    monkeypatch.setattr(sync_opencode_agents, "MODEL_CACHE", cache)
+
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = "moonshotai-cn/kimi-k2.6\nopenai/gpt-5.5-pro\n"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return Result()
+
+    monkeypatch.setattr(sync_opencode_agents.subprocess, "run", fake_run)
+
+    models = sync_opencode_agents.discover_opencode_models()
+    ids = [m["id"] for m in models]
+
+    assert calls
+    assert ids == ["moonshotai-cn/kimi-k2.6", "openai/gpt-5.5-pro"]
+    assert models[0]["provider"] == "Moonshot AI (China)"
+
+
 def test_cleanup_unmanaged_opencode_artifacts_ignores_busy_runtime_dir(tmp_path, monkeypatch):
     sync_opencode_agents = _load_sync_opencode_agents()
     opencode_dir = tmp_path / ".opencode"

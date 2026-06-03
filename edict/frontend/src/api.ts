@@ -27,8 +27,18 @@ async function postJ<T>(url: string, data: unknown): Promise<T> {
 export const api = {
   // 核心数据
   liveStatus: () => fetchJ<LiveStatus>(`${API_BASE}/api/live-status`),
-  agentConfig: () => fetchJ<AgentConfig>(`${API_BASE}/api/agent-config`),
+  agentConfig: (refresh = false) =>
+    fetchJ<AgentConfig>(`${API_BASE}/api/agent-config${refresh ? '?refresh=1' : ''}`),
   modelHealth: () => fetchJ<ModelHealthData>(`${API_BASE}/api/model-health`),
+  modelRegistry: (refresh = false) =>
+    fetchJ<ModelRegistryData>(`${API_BASE}/api/model-registry${refresh ? '?refresh=1' : ''}`),
+  refreshModelRegistry: () =>
+    postJ<ModelRegistryData>(`${API_BASE}/api/model-registry/refresh`, {}),
+  addCustomModel: (payload: CustomModelPayload) =>
+    postJ<ActionResult & { model?: ModelRegistryEntry; registry?: ModelRegistryData; restartRequired?: boolean }>(
+      `${API_BASE}/api/model-registry/custom`,
+      payload
+    ),
   modelChangeLog: () => fetchJ<ChangeLogEntry[]>(`${API_BASE}/api/model-change-log`).catch(() => []),
   officialsStats: () => fetchJ<OfficialsData>(`${API_BASE}/api/officials-stats`),
   morningBrief: () => fetchJ<MorningBrief>(`${API_BASE}/api/morning-brief`),
@@ -452,6 +462,73 @@ export interface KnownModel {
   provider: string;
 }
 
+export interface ModelRegistrySource {
+  id: string;
+  label: string;
+  ok: boolean;
+  count: number;
+  latencyMs?: number | null;
+  error?: string;
+  refreshed?: boolean;
+}
+
+export interface ModelRegistryEntry extends KnownModel {
+  providerId?: string;
+  providerName?: string;
+  sources?: string[];
+  source?: string;
+  tier?: string;
+  tierLabel?: string;
+  recentStatus?: string;
+  statusLabel?: string;
+  status?: string;
+  latencyMs?: number | null;
+  latencyLabel?: string;
+  averageLatencyMs?: number | null;
+  latencyCount?: number;
+  lastMeasuredAt?: string;
+  lastError?: string;
+  lastTaskId?: string;
+  lastDispatchId?: string;
+  context?: number;
+  family?: string;
+  apiURL?: string;
+  apiType?: string;
+  baseURL?: string;
+  apiKeyMasked?: string;
+  manual?: boolean;
+}
+
+export interface ModelRegistryData {
+  ok: boolean;
+  runtime: string;
+  runtimeLabel?: string;
+  generatedAt: string;
+  refreshed?: boolean;
+  sources: ModelRegistrySource[];
+  summary: {
+    total: number;
+    measured: number;
+    unmeasured: number;
+    providers: Record<string, number>;
+    statuses?: Record<string, number>;
+    sourceCount?: number;
+  };
+  models: ModelRegistryEntry[];
+  manualModels?: ModelRegistryEntry[];
+  errors?: string[];
+}
+
+export interface CustomModelPayload {
+  providerId: string;
+  providerName?: string;
+  modelId: string;
+  label?: string;
+  apiType?: string;
+  baseURL?: string;
+  apiKey?: string;
+}
+
 export interface AgentConfig {
   agents: AgentInfo[];
   defaultModel?: string;
@@ -489,6 +566,9 @@ export interface ModelHealthAgent {
   failureCount: number;
   timeoutCount: number;
   successCount: number;
+  lastLatencyMs?: number | null;
+  averageLatencyMs?: number | null;
+  latencyCount?: number;
   fallbackModel?: string;
   fallbackLabel?: string;
   lastTaskId?: string;

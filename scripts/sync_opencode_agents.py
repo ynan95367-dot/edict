@@ -115,6 +115,8 @@ def provider_for_model(model_id: str) -> str:
         'opencode': 'OpenCode',
         'github-copilot': 'GitHub Copilot',
         'copilot': 'Copilot',
+        'moonshotai-cn': 'Moonshot AI (China)',
+        'moonshot': 'Moonshot AI',
         'anthropic': 'Anthropic',
         'openai': 'OpenAI',
         'openai-codex': 'OpenAI Codex',
@@ -161,6 +163,8 @@ def normalize_model_entry(entry, default_provider: str = ''):
 
 
 def cached_opencode_models() -> list[dict]:
+    if os.environ.get('OPENCODE_MODEL_REFRESH') or os.environ.get('OPENCODE_MODELS_REFRESH'):
+        return []
     cached = read_json(MODEL_CACHE, {})
     if not isinstance(cached, dict):
         return []

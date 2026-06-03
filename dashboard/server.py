@@ -12,8 +12,8 @@ Endpoints:
   GET  /api/model-change-log   → data/model_change_log.json
   GET  /api/last-result        → data/last_model_change_result.json
 """
-import json, pathlib, subprocess, sys, threading, argparse, datetime, logging, re, os, socket, shutil, uuid, shlex, sqlite3, signal
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import json, pathlib, subprocess, sys, threading, argparse, datetime, logging, re, os, socket, shutil, uuid, shlex, sqlite3, signal, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, urlencode, parse_qs, quote
 from urllib.request import Request, urlopen
 
@@ -3257,6 +3257,8 @@ def _sync_opencode_agent_config(force=False):
         opencode_bin = _resolve_opencode_bin()
         if opencode_bin:
             env['OPENCODE_BIN'] = opencode_bin
+        if force:
+            env['OPENCODE_MODEL_REFRESH'] = '1'
         env.setdefault('OPENCODE_SERVER_URL', _opencode_server_url())
         try:
             proc = subprocess.run(
@@ -3364,6 +3366,8 @@ def _model_provider(model_id, known=None):
         'opencode': 'OpenCode',
         'github-copilot': 'GitHub Copilot',
         'copilot': 'Copilot',
+        'moonshotai-cn': 'Moonshot AI (China)',
+        'moonshot': 'Moonshot AI',
         'anthropic': 'Anthropic',
         'openai': 'OpenAI',
         'openai-codex': 'OpenAI Codex',
@@ -3612,7 +3616,19 @@ def _apply_agent_model_immediate(agent_id, new_model, *, reason='', source='auto
     return change
 
 
-def _record_model_health(agent_id, model_id, status, *, error='', task_id='', trace_id='', dispatch_id='', session_id='', fallback_model=''):
+def _record_model_health(
+    agent_id,
+    model_id,
+    status,
+    *,
+    error='',
+    task_id='',
+    trace_id='',
+    dispatch_id='',
+    session_id='',
+    fallback_model='',
+    latency_ms=None,
+):
     agent_id = str(agent_id or '').strip()
     model_id = str(model_id or '').strip()
     if not agent_id or not model_id:
@@ -3648,6 +3664,19 @@ def _record_model_health(agent_id, model_id, status, *, error='', task_id='', tr
             'lastDispatchId': dispatch_id,
             'lastSessionId': session_id,
         })
+        try:
+            if latency_ms is not None:
+                last_latency = max(0, int(latency_ms))
+                prev_avg = rec.get('averageLatencyMs')
+                prev_count = int(rec.get('latencyCount') or 0)
+                if isinstance(prev_avg, (int, float)) and prev_count > 0:
+                    rec['averageLatencyMs'] = int(((float(prev_avg) * prev_count) + last_latency) / (prev_count + 1))
+                else:
+                    rec['averageLatencyMs'] = last_latency
+                rec['lastLatencyMs'] = last_latency
+                rec['latencyCount'] = prev_count + 1
+        except Exception:
+            pass
         if normalized == 'ok':
             rec['lastSuccessAt'] = at
             rec['successCount'] = int(rec.get('successCount') or 0) + 1
@@ -3817,6 +3846,9 @@ def get_model_health():
             'failureCount': int(rec.get('failureCount') or (1 if outbox_signal else 0)),
             'timeoutCount': int(rec.get('timeoutCount') or 0),
             'successCount': int(rec.get('successCount') or 0),
+            'lastLatencyMs': rec.get('lastLatencyMs'),
+            'averageLatencyMs': rec.get('averageLatencyMs'),
+            'latencyCount': int(rec.get('latencyCount') or 0),
             'fallbackModel': rec.get('fallbackModel') or fallback,
             'fallbackLabel': _model_label(rec.get('fallbackModel') or fallback, known) if (rec.get('fallbackModel') or fallback) else '',
             'lastTaskId': rec.get('lastTaskId') or outbox_signal.get('lastTaskId') or '',
@@ -3848,6 +3880,457 @@ def get_model_health():
         ],
         'events': (health.get('events') or [])[-80:],
         'failovers': (health.get('failovers') or [])[-50:],
+    }
+
+
+def _model_registry_file():
+    return DATA / 'model_registry.json'
+
+
+def _custom_models_file():
+    return DATA / 'custom_models.json'
+
+
+def _empty_custom_models():
+    return {'version': 1, 'updatedAt': now_iso(), 'models': []}
+
+
+def _safe_provider_id(value):
+    raw = str(value or '').strip().lower()
+    raw = re.sub(r'[^a-z0-9_.-]+', '-', raw).strip('.-')
+    return raw or 'custom'
+
+
+def _mask_secret(value):
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    if len(text) <= 8:
+        return '••••'
+    return f'{text[:4]}••••{text[-4:]}'
+
+
+def _latency_label(latency_ms):
+    if not isinstance(latency_ms, (int, float)):
+        return '未观测'
+    if latency_ms < 900:
+        return '快'
+    if latency_ms < 3000:
+        return '正常'
+    if latency_ms < 10000:
+        return '偏慢'
+    return '很慢'
+
+
+def _read_custom_models(mask=True):
+    data = atomic_json_read(_custom_models_file(), _empty_custom_models())
+    if not isinstance(data, dict):
+        data = _empty_custom_models()
+    models = data.get('models') if isinstance(data.get('models'), list) else []
+    out = []
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        full_id = str(item.get('id') or item.get('fullId') or '').strip()
+        provider_id = _safe_provider_id(item.get('providerId') or (full_id.split('/', 1)[0] if '/' in full_id else 'custom'))
+        model_id = str(item.get('modelId') or (full_id.split('/', 1)[-1] if full_id else '')).strip()
+        if not model_id:
+            continue
+        full_id = full_id or f'{provider_id}/{model_id}'
+        entry = {
+            'id': full_id,
+            'modelId': model_id,
+            'label': str(item.get('label') or _model_label(full_id)).strip(),
+            'provider': str(item.get('providerName') or item.get('provider') or _model_provider(full_id)).strip(),
+            'providerId': provider_id,
+            'providerName': str(item.get('providerName') or item.get('provider') or _model_provider(full_id)).strip(),
+            'apiType': str(item.get('apiType') or 'openai').strip(),
+            'baseURL': str(item.get('baseURL') or '').strip(),
+            'source': 'manual-api',
+            'manual': True,
+            'createdAt': item.get('createdAt') or '',
+            'updatedAt': item.get('updatedAt') or data.get('updatedAt') or '',
+        }
+        if mask:
+            entry['apiKeyMasked'] = _mask_secret(item.get('apiKey') or item.get('api_key') or '')
+        else:
+            entry['apiKey'] = str(item.get('apiKey') or item.get('api_key') or '')
+        out.append(entry)
+    return out
+
+
+def _opencode_cli_model_entries(force=False):
+    started = time.perf_counter()
+    source = {
+        'id': 'opencode-cli',
+        'label': 'OpenCode CLI',
+        'ok': False,
+        'count': 0,
+        'latencyMs': None,
+        'error': '',
+        'refreshed': bool(force),
+    }
+    entries = []
+    bin_path = _resolve_opencode_bin()
+    if not bin_path:
+        source.update({'latencyMs': int((time.perf_counter() - started) * 1000), 'error': 'OpenCode CLI 未找到'})
+        return entries, source
+    try:
+        env = os.environ.copy()
+        if force:
+            env['OPENCODE_MODEL_REFRESH'] = '1'
+        proc = subprocess.run(
+            [bin_path, 'models'],
+            cwd=str(PROJECT_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except Exception as exc:
+        source.update({
+            'latencyMs': int((time.perf_counter() - started) * 1000),
+            'error': _clean_runtime_error(str(exc), limit=240) if '_clean_runtime_error' in globals() else str(exc)[:240],
+        })
+        return entries, source
+    source['latencyMs'] = int((time.perf_counter() - started) * 1000)
+    if proc.returncode != 0:
+        error = proc.stderr or proc.stdout or f'exit {proc.returncode}'
+        source['error'] = _clean_runtime_error(error, limit=240) if '_clean_runtime_error' in globals() else error[:240]
+        return entries, source
+    seen = set()
+    for line in proc.stdout.splitlines():
+        model_id = line.strip()
+        if not model_id or model_id.startswith('#') or model_id in seen:
+            continue
+        seen.add(model_id)
+        entries.append({
+            'id': model_id,
+            'label': _model_label(model_id),
+            'provider': _model_provider(model_id),
+            'source': 'opencode-cli',
+        })
+    source.update({'ok': True, 'count': len(entries)})
+    return entries, source
+
+
+def _opencode_provider_model_entries():
+    started = time.perf_counter()
+    source = {
+        'id': 'opencode-server',
+        'label': 'OpenCode Server',
+        'ok': False,
+        'count': 0,
+        'latencyMs': None,
+        'error': '',
+    }
+    entries = []
+    try:
+        req = Request(f'{_opencode_server_url()}/config/providers', headers={'Accept': 'application/json'})
+        data = json.loads(urlopen(req, timeout=5).read().decode('utf-8'))
+    except Exception as exc:
+        source.update({
+            'latencyMs': int((time.perf_counter() - started) * 1000),
+            'error': _clean_runtime_error(str(exc), limit=240) if '_clean_runtime_error' in globals() else str(exc)[:240],
+        })
+        return entries, source
+
+    providers = data.get('providers') if isinstance(data, dict) else []
+    if not isinstance(providers, list):
+        providers = []
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        provider_id = str(provider.get('id') or '').strip()
+        provider_name = str(provider.get('name') or _model_provider(provider_id)).strip()
+        models = provider.get('models')
+        if isinstance(models, dict):
+            iterable = models.items()
+        elif isinstance(models, list):
+            iterable = [(item.get('id') if isinstance(item, dict) else '', item) for item in models]
+        else:
+            iterable = []
+        for key, model in iterable:
+            model = model if isinstance(model, dict) else {'id': key}
+            model_id = str(model.get('id') or key or '').strip()
+            if not model_id:
+                continue
+            full_id = model_id if '/' in model_id else f'{provider_id}/{model_id}' if provider_id else model_id
+            limit = model.get('limit') if isinstance(model.get('limit'), dict) else {}
+            api = model.get('api') if isinstance(model.get('api'), dict) else {}
+            entries.append({
+                'id': full_id,
+                'label': str(model.get('name') or _model_label(full_id)).strip(),
+                'provider': provider_name,
+                'providerId': provider_id,
+                'source': 'opencode-server',
+                'context': limit.get('context'),
+                'status': model.get('status') or 'active',
+                'apiURL': api.get('url') or '',
+                'family': model.get('family') or '',
+            })
+    source.update({
+        'ok': True,
+        'count': len(entries),
+        'latencyMs': int((time.perf_counter() - started) * 1000),
+    })
+    return entries, source
+
+
+def _model_health_latency_snapshot(health=None):
+    health = health or _read_model_health()
+    records = health.get('records') if isinstance(health.get('records'), dict) else {}
+    by_model = {}
+    for rec in records.values():
+        if not isinstance(rec, dict):
+            continue
+        model_id = str(rec.get('model') or '').strip()
+        if not model_id:
+            continue
+        updated = str(rec.get('updatedAt') or rec.get('lastSuccessAt') or rec.get('lastFailureAt') or '')
+        current = by_model.get(model_id)
+        if current and str(current.get('updatedAt') or '') >= updated:
+            continue
+        latency = rec.get('lastLatencyMs')
+        if not isinstance(latency, (int, float)):
+            latency = rec.get('averageLatencyMs')
+        by_model[model_id] = {
+            'status': rec.get('status') or 'unknown',
+            'statusLabel': rec.get('statusLabel') or _model_status_label(rec.get('status') or 'unknown'),
+            'latencyMs': int(latency) if isinstance(latency, (int, float)) else None,
+            'averageLatencyMs': int(rec.get('averageLatencyMs')) if isinstance(rec.get('averageLatencyMs'), (int, float)) else None,
+            'latencyCount': int(rec.get('latencyCount') or 0),
+            'updatedAt': updated,
+            'lastError': rec.get('lastError') or '',
+            'lastTaskId': rec.get('lastTaskId') or '',
+            'lastDispatchId': rec.get('lastDispatchId') or '',
+        }
+    return by_model
+
+
+def _merge_model_registry_entries(groups):
+    merged = {}
+    order = []
+    for group in groups:
+        for entry in group or []:
+            if not isinstance(entry, dict):
+                continue
+            model_id = str(entry.get('id') or entry.get('name') or '').strip()
+            if not model_id:
+                continue
+            if model_id not in merged:
+                merged[model_id] = {
+                    'id': model_id,
+                    'label': _model_label(model_id),
+                    'provider': _model_provider(model_id),
+                    'sources': [],
+                }
+                order.append(model_id)
+            target = merged[model_id]
+            for key in (
+                'label', 'provider', 'providerId', 'providerName', 'context', 'status',
+                'apiURL', 'family', 'manual', 'apiType', 'baseURL', 'apiKeyMasked',
+                'createdAt', 'updatedAt',
+            ):
+                value = entry.get(key)
+                if value not in (None, ''):
+                    target[key] = value
+            source = str(entry.get('source') or '').strip()
+            if source and source not in target['sources']:
+                target['sources'].append(source)
+    return [merged[model_id] for model_id in order]
+
+
+def _model_registry_summary(models, sources):
+    providers = {}
+    statuses = {'ok': 0, 'timeout': 0, 'failed': 0, 'degraded': 0, 'offline': 0, 'unknown': 0}
+    measured = 0
+    for item in models:
+        provider = item.get('provider') or 'Custom'
+        providers[provider] = providers.get(provider, 0) + 1
+        status = item.get('recentStatus') or 'unknown'
+        statuses[status if status in statuses else 'unknown'] += 1
+        if isinstance(item.get('latencyMs'), (int, float)):
+            measured += 1
+    return {
+        'total': len(models),
+        'measured': measured,
+        'unmeasured': len(models) - measured,
+        'providers': providers,
+        'statuses': statuses,
+        'sourceCount': sum(int(src.get('count') or 0) for src in sources),
+    }
+
+
+def get_model_registry(force=False):
+    if force:
+        _sync_opencode_agent_config(force=True)
+    cfg = get_agent_config_response(force=False)
+    known = _known_model_entries(cfg)
+    health = _read_model_health()
+    latency = _model_health_latency_snapshot(health)
+    cli_entries, cli_source = _opencode_cli_model_entries(force=force)
+    provider_entries, provider_source = _opencode_provider_model_entries()
+    manual_entries = _read_custom_models(mask=True)
+    current_entries = [
+        {
+            'id': entry.get('id'),
+            'label': entry.get('label'),
+            'provider': entry.get('provider'),
+            'source': 'agent-config',
+        }
+        for entry in known
+        if isinstance(entry, dict) and entry.get('id')
+    ]
+    models = _merge_model_registry_entries([current_entries, cli_entries, provider_entries, manual_entries])
+    for item in models:
+        model_id = item.get('id')
+        tier = _model_tier(model_id)
+        signal = latency.get(model_id) or {}
+        status = signal.get('status') or _recent_model_record_status(model_id, health) or 'unknown'
+        item.update({
+            'tier': tier,
+            'tierLabel': _model_tier_label(tier),
+            'recentStatus': status,
+            'statusLabel': signal.get('statusLabel') or _model_status_label(status),
+            'latencyMs': signal.get('latencyMs'),
+            'latencyLabel': _latency_label(signal.get('latencyMs')),
+            'averageLatencyMs': signal.get('averageLatencyMs'),
+            'latencyCount': int(signal.get('latencyCount') or 0),
+            'lastMeasuredAt': signal.get('updatedAt') or '',
+            'lastError': signal.get('lastError') or '',
+            'lastTaskId': signal.get('lastTaskId') or '',
+            'lastDispatchId': signal.get('lastDispatchId') or '',
+        })
+        item['source'] = item['sources'][0] if item.get('sources') else item.get('source') or 'unknown'
+    models.sort(key=lambda item: (
+        0 if str(item.get('id', '')).startswith('opencode/') else 1,
+        item.get('provider') or '',
+        item.get('label') or item.get('id') or '',
+    ))
+    sources = [cli_source, provider_source, {'id': 'manual-api', 'label': '手动 API', 'ok': True, 'count': len(manual_entries), 'latencyMs': 0, 'error': ''}]
+    payload = {
+        'ok': True,
+        'runtime': _agent_runtime(),
+        'runtimeLabel': _runtime_label(),
+        'generatedAt': now_iso(),
+        'refreshed': bool(force),
+        'sources': sources,
+        'summary': _model_registry_summary(models, sources),
+        'models': models,
+        'manualModels': manual_entries,
+        'errors': [src.get('error') for src in sources if src.get('error')],
+    }
+    atomic_json_write(_model_registry_file(), payload)
+    return payload
+
+
+def add_custom_model_to_registry(body):
+    body = body if isinstance(body, dict) else {}
+    raw_model = str(body.get('modelId') or body.get('model') or '').strip()
+    provider_id = _safe_provider_id(body.get('providerId') or '')
+    if '/' in raw_model and not body.get('providerId'):
+        raw_provider, raw_model_name = raw_model.split('/', 1)
+        provider_id = _safe_provider_id(raw_provider)
+        model_id = raw_model_name.strip()
+        full_id = f'{provider_id}/{model_id}'
+    else:
+        model_id = raw_model
+        full_id = f'{provider_id}/{model_id}' if provider_id and model_id else ''
+    if not model_id or not provider_id:
+        return {'ok': False, 'error': 'providerId and modelId required'}
+
+    provider_name = str(body.get('providerName') or body.get('provider') or _model_provider(provider_id)).strip()
+    label = str(body.get('label') or _model_label(full_id)).strip()
+    api_type = str(body.get('apiType') or 'openai').strip()
+    base_url = str(body.get('baseURL') or body.get('baseUrl') or '').strip()
+    api_key = str(body.get('apiKey') or '').strip()
+    now = now_iso()
+    saved = {}
+
+    def _update_custom(data):
+        nonlocal saved
+        data = data if isinstance(data, dict) else _empty_custom_models()
+        models = data.get('models') if isinstance(data.get('models'), list) else []
+        existing = next((m for m in models if isinstance(m, dict) and (m.get('id') or m.get('fullId')) == full_id), None)
+        if existing is None:
+            existing = {'createdAt': now}
+            models.append(existing)
+        existing.update({
+            'id': full_id,
+            'fullId': full_id,
+            'providerId': provider_id,
+            'providerName': provider_name,
+            'modelId': model_id,
+            'label': label,
+            'apiType': api_type,
+            'baseURL': base_url,
+            'updatedAt': now,
+        })
+        if api_key:
+            existing['apiKey'] = api_key
+        saved = dict(existing)
+        data.update({'version': 1, 'updatedAt': now, 'models': models})
+        return data
+
+    atomic_json_update(_custom_models_file(), _update_custom, _empty_custom_models())
+
+    def _update_dashboard(cfg):
+        cfg = cfg if isinstance(cfg, dict) else {}
+        known = cfg.get('knownModels') if isinstance(cfg.get('knownModels'), list) else []
+        found = False
+        for entry in known:
+            if isinstance(entry, dict) and entry.get('id') == full_id:
+                entry.update({'id': full_id, 'label': label, 'provider': provider_name})
+                found = True
+                break
+        if not found:
+            known.append({'id': full_id, 'label': label, 'provider': provider_name})
+        cfg['knownModels'] = known
+        cfg['updatedAt'] = now
+        return cfg
+
+    atomic_json_update(DATA / 'agent_config.json', _update_dashboard, {})
+
+    ocfg_path = PROJECT_ROOT / 'opencode.json'
+
+    def _update_opencode(cfg):
+        cfg = cfg if isinstance(cfg, dict) else {}
+        providers = cfg.get('provider') if isinstance(cfg.get('provider'), dict) else {}
+        provider = providers.get(provider_id) if isinstance(providers.get(provider_id), dict) else {}
+        options = provider.get('options') if isinstance(provider.get('options'), dict) else {}
+        provider.update({'id': provider_id, 'name': provider_name, 'api': api_type})
+        if base_url:
+            options['baseURL'] = base_url
+        if api_key:
+            options['apiKey'] = api_key
+        provider['options'] = options
+        models = provider.get('models') if isinstance(provider.get('models'), dict) else {}
+        model_cfg = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
+        model_cfg.update({'id': model_id, 'name': label, 'status': 'active'})
+        models[model_id] = model_cfg
+        provider['models'] = models
+        providers[provider_id] = provider
+        cfg['provider'] = providers
+        cfg.setdefault('$schema', 'https://opencode.ai/config.json')
+        return cfg
+
+    atomic_json_update(ocfg_path, _update_opencode, {})
+    _append_runtime_event('model_registry_custom_added', payload={
+        'model': full_id,
+        'providerId': provider_id,
+        'provider': provider_name,
+        'apiType': api_type,
+        'baseURL': base_url,
+        'remark': f'手动 API 模型已保存：{label}',
+    }, confidence='medium')
+    return {
+        'ok': True,
+        'message': f'已添加模型 {full_id}',
+        'model': {**saved, 'apiKeyMasked': _mask_secret(saved.get('apiKey') or ''), 'apiKey': ''},
+        'registry': get_model_registry(force=False),
+        'restartRequired': True,
     }
 
 
@@ -7778,7 +8261,14 @@ def _execute_dispatch_outbox_item(item):
                 'executionIsolation': execution_isolation,
                 'remark': f'开始派发: {agent_id} (第{attempt}次)',
             }, trace_id=trace_id)
-            result = _run_capture_timeout(cmd, timeout=310, env=dispatch_env, cwd=str(dispatch_dir))
+            dispatch_perf_started = time.perf_counter()
+            dispatch_latency_ms = None
+            try:
+                result = _run_capture_timeout(cmd, timeout=310, env=dispatch_env, cwd=str(dispatch_dir))
+                dispatch_latency_ms = int((time.perf_counter() - dispatch_perf_started) * 1000)
+            except subprocess.TimeoutExpired:
+                dispatch_latency_ms = int((time.perf_counter() - dispatch_perf_started) * 1000)
+                raise
             if result.returncode == 0:
                 session_id = _opencode_session_id_from_output(result.stdout) if runtime == 'opencode' else ''
                 session_error = _opencode_session_error(session_id) if runtime == 'opencode' else ''
@@ -7804,7 +8294,6 @@ def _execute_dispatch_outbox_item(item):
                         'error': err,
                     }, confidence='low', trace_id=trace_id, session_id=session_id)
                     if attempt < max_retries:
-                        import time
                         time.sleep(5)
                         continue
                     if runtime == 'opencode':
@@ -7827,6 +8316,7 @@ def _execute_dispatch_outbox_item(item):
                             dispatch_id=dispatch_id,
                             session_id=session_id,
                             fallback_model=fallback_model,
+                            latency_ms=dispatch_latency_ms,
                         )
                     break
                 log.info(f'✅ {task_id} 自动派发成功 → {agent_id}')
@@ -7839,6 +8329,7 @@ def _execute_dispatch_outbox_item(item):
                         trace_id=trace_id,
                         dispatch_id=dispatch_id,
                         session_id=session_id,
+                        latency_ms=dispatch_latency_ms,
                     )
                 if _update_if_current(
                     'success',
@@ -7882,7 +8373,6 @@ def _execute_dispatch_outbox_item(item):
                     continue
             log.warning(f'⚠️ {task_id} 自动派发失败(第{attempt}次): {err}')
             if attempt < max_retries:
-                import time
                 time.sleep(5)
         log.error(f'❌ {task_id} 自动派发最终失败 → {agent_id}')
         if runtime == 'opencode' and final_status != 'opencode-session-stale':
@@ -7904,6 +8394,7 @@ def _execute_dispatch_outbox_item(item):
                 trace_id=trace_id,
                 dispatch_id=dispatch_id,
                 fallback_model=fallback_model,
+                latency_ms=dispatch_latency_ms,
             )
         _update_if_current(
             final_status,
@@ -7946,6 +8437,7 @@ def _execute_dispatch_outbox_item(item):
                 trace_id=trace_id,
                 dispatch_id=dispatch_id,
                 fallback_model=fallback_model,
+                latency_ms=locals().get('dispatch_latency_ms'),
             )
         _update_if_current(
             'timeout',
@@ -8322,6 +8814,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(get_agent_config_response(force=force_refresh))
         elif p == '/api/model-health':
             self.send_json(get_model_health())
+        elif p == '/api/model-registry':
+            force_refresh = (qs.get('refresh') or [''])[0] in {'1', 'true', 'yes'}
+            self.send_json(get_model_registry(force=force_refresh))
         elif p == '/api/capabilities':
             self.send_json(list_capabilities())
         elif p == '/api/run-specs':
@@ -8834,6 +9329,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(result)
             return
 
+        if p == '/api/model-registry/refresh':
+            self.send_json(get_model_registry(force=True))
+            return
+
+        if p == '/api/model-registry/custom':
+            result = add_custom_model_to_registry(body)
+            self.send_json(result, 200 if result.get('ok') else 400)
+            return
+
         if p == '/api/set-model':
             agent_id = body.get('agentId', '').strip()
             model = body.get('model', '').strip()
@@ -8933,7 +9437,7 @@ def main():
         f'http://127.0.0.1:{args.port}', f'http://localhost:{args.port}',
     }
 
-    server = HTTPServer((args.host, args.port), Handler)
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
     log.info(f'三省六部看板启动 → http://{args.host}:{args.port}')
     print(f'   按 Ctrl+C 停止')
 
