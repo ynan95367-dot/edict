@@ -35,6 +35,46 @@ def test_event_log_append_list_and_activity(monkeypatch, tmp_path):
     assert activity[1]['items'][0]['title'] == '跑测试'
 
 
+def test_event_log_maps_governance_events_to_flow(monkeypatch, tmp_path):
+    import event_log
+
+    monkeypatch.setattr(event_log, 'EVENTS_DIR', tmp_path / 'events')
+
+    run_event = event_log.append_event(
+        'run.spec.created',
+        task_id='T-GOV',
+        trace_id='trc_gov',
+        payload={
+            'mode': 'execute',
+            'riskLevel': 'high',
+            'dispatchPolicy': 'hold_for_policy',
+            'policyGate': {'label': '等待权限审批'},
+        },
+        at='2026-06-03T01:00:00Z',
+    )
+    patch_event = event_log.append_event(
+        'patch_review_created',
+        task_id='T-GOV',
+        trace_id='trc_gov',
+        payload={
+            'paths': ['dashboard/server.py'],
+            'worktreeBranch': 'edict/T-GOV',
+        },
+        at='2026-06-03T01:01:00Z',
+    )
+
+    run_activity = event_log.event_to_activity_entries(run_event)[0]
+    patch_activity = event_log.event_to_activity_entries(patch_event)[0]
+    assert run_activity['kind'] == 'flow'
+    assert run_activity['from'] == '命令中心'
+    assert 'RunSpec 已生成' in run_activity['remark']
+    assert '等待权限审批' in run_activity['remark']
+    assert patch_activity['kind'] == 'flow'
+    assert patch_activity['from'] == 'Patch 审批'
+    assert '生成 Patch 审批' in patch_activity['remark']
+    assert 'edict/T-GOV' in patch_activity['remark']
+
+
 def test_agent_comm_message_lifecycle(monkeypatch, tmp_path):
     import agent_comm
     import event_log
@@ -113,6 +153,56 @@ def test_task_activity_merges_event_ledger(monkeypatch, tmp_path):
     assert result['activitySource'] == 'progress+session+event-ledger'
     assert result['stateEvidence']['eventCount'] == 1
     assert any(a.get('eventId') == 'evt_test' for a in result['activity'])
+
+
+def test_task_activity_merges_trace_only_ledger_events(monkeypatch, tmp_path):
+    import event_log
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    task = {
+        'id': 'T-TRACE',
+        'title': 'trace 事件补全',
+        'state': 'Menxia',
+        'org': '门下省',
+        'now': '等待审批',
+        'updatedAt': '2026-06-03T01:00:00Z',
+        'traceId': 'trc_trace_only',
+        'flow_log': [],
+        'progress_log': [],
+    }
+    (data_dir / 'tasks_source.json').write_text(json.dumps([task], ensure_ascii=False), encoding='utf-8')
+    trace_event = {
+        'eventId': 'evt_trace_only',
+        'kind': 'patch_review_created',
+        'at': '2026-06-03T01:05:00Z',
+        'taskId': '',
+        'traceId': 'trc_trace_only',
+        'agentId': '',
+        'payload': {'paths': ['dashboard/server.py']},
+        'confidence': 'high',
+    }
+
+    def fake_list_events(task_id='', trace_id='', limit=200, **_kwargs):
+        if task_id == 'T-TRACE':
+            return []
+        if trace_id == 'trc_trace_only':
+            return [trace_event]
+        return []
+
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
+    monkeypatch.setattr(srv, '_ledger_list_events', fake_list_events)
+    monkeypatch.setattr(srv, '_ledger_event_to_activity_entries', event_log.event_to_activity_entries)
+    monkeypatch.setattr(srv, 'get_agent_activity', lambda *args, **kwargs: [])
+
+    result = srv.get_task_activity('T-TRACE')
+
+    assert result['ok'] is True
+    assert result['stateEvidence']['eventCount'] == 1
+    assert result['traceSummary']['eventKinds']['patch_review_created'] == 1
+    assert any(a.get('eventId') == 'evt_trace_only' and a.get('kind') == 'flow' for a in result['activity'])
 
 
 def test_opencode_storage_activity_parser(monkeypatch, tmp_path):

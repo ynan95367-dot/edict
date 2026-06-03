@@ -179,6 +179,50 @@ def event_to_activity_entries(event: dict[str, Any]) -> list[dict[str, Any]]:
         'confidence': event.get('confidence', ''),
     }
 
+    if kind == 'run.spec.created':
+        gate = payload.get('policyGate') if isinstance(payload.get('policyGate'), dict) else {}
+        mode = payload.get('mode') or payload.get('requestedMode') or ''
+        risk = payload.get('riskLevel') or ''
+        dispatch_policy = payload.get('dispatchPolicy') or gate.get('decision') or ''
+        label = gate.get('label') or dispatch_policy or 'RunSpec'
+        detail = ' · '.join(str(item) for item in (mode, risk, label) if item)
+        return [{
+            **base,
+            'kind': 'flow',
+            'from': '命令中心',
+            'to': payload.get('targetDept') or payload.get('to') or 'RunSpec',
+            'remark': f'RunSpec 已生成{f"：{detail}" if detail else ""}',
+        }]
+
+    if kind in {'patch_review_created', 'patch_review_decided'}:
+        action = payload.get('action') or ''
+        status = payload.get('status') or ''
+        paths = payload.get('paths') if isinstance(payload.get('paths'), list) else []
+        branch = payload.get('worktreeBranch') or ''
+        if kind == 'patch_review_created':
+            remark = payload.get('remark') or f'生成 Patch 审批：{len(paths)} 个文件'
+        else:
+            decision = '已准奏' if action == 'approve' or status == 'approved' else '已驳回'
+            remark = payload.get('remark') or f'Patch {decision}'
+        if branch:
+            remark = f'{remark} · {branch}'
+        return [{
+            **base,
+            'kind': 'flow',
+            'from': 'Patch 审批',
+            'to': payload.get('to') or event.get('agentId') or 'dashboard',
+            'remark': remark,
+        }]
+
+    if kind in {'outbox_requeued', 'outbox_archived'}:
+        return [{
+            **base,
+            'kind': 'flow',
+            'from': 'Runtime Outbox',
+            'to': payload.get('to') or event.get('agentId') or '',
+            'remark': payload.get('remark') or payload.get('reason') or kind,
+        }]
+
     if kind == 'progress_reported':
         entries = []
         text = payload.get('text') or payload.get('summary') or ''

@@ -5965,6 +5965,48 @@ def _build_trace_summary(trace_id, events, activity, outbox_summary):
     }
 
 
+def _ledger_event_key(event):
+    if not isinstance(event, dict):
+        return ''
+    return event.get('eventId') or '|'.join(str(event.get(key, '')) for key in (
+        'kind', 'at', 'taskId', 'traceId', 'agentId', 'sessionId', 'messageId'
+    ))
+
+
+def _list_task_ledger_events(task_id, trace_id='', limit=200):
+    if not _ledger_list_events:
+        return []
+    merged = []
+    seen = set()
+
+    def _add(events):
+        for event in events or []:
+            if not isinstance(event, dict):
+                continue
+            key = _ledger_event_key(event)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(event)
+
+    try:
+        _add(_ledger_list_events(task_id=task_id, limit=limit))
+    except Exception as exc:
+        log.warning(f'按 taskId 读取事件账本失败 (task={task_id}): {exc}')
+
+    if trace_id and trace_id != task_id:
+        try:
+            _add(_ledger_list_events(trace_id=trace_id, limit=limit))
+        except TypeError:
+            # Older test doubles or optional ledgers may not support trace lookup.
+            pass
+        except Exception as exc:
+            log.warning(f'按 traceId 读取事件账本失败 (trace={trace_id}): {exc}')
+
+    merged.sort(key=lambda e: e.get('at', ''))
+    return merged[-max(1, int(limit or 200)):]
+
+
 def _safe_preview(value, limit=220):
     text = _display_project_text(value)
     text = re.sub(r'\s+', ' ', text).strip()
@@ -6541,7 +6583,7 @@ def get_task_activity(task_id):
     ledger_events = []
     if _ledger_list_events and _ledger_event_to_activity_entries:
         try:
-            ledger_events = _ledger_list_events(task_id=task_id, limit=200)
+            ledger_events = _list_task_ledger_events(task_id, trace_id, limit=200)
             existing_keys = {_activity_key(a) for a in activity}
             for event in ledger_events:
                 for entry in _ledger_event_to_activity_entries(event):
