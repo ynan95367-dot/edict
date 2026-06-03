@@ -208,6 +208,109 @@ def test_model_registry_merges_opencode_cli_server_manual_and_latency(monkeypatc
     assert registry['summary']['total'] == 4
 
 
+def test_model_probe_records_latency_into_registry(monkeypatch, tmp_path):
+    """Active probes should measure a model and make the registry show real latency."""
+    import subprocess
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    (data_dir / 'agent_config.json').write_text(
+        json.dumps(
+            {
+                'runtime': 'opencode',
+                'defaultModel': 'opencode/big-pickle',
+                'knownModels': [{'id': 'opencode/big-pickle', 'label': 'Big Pickle', 'provider': 'OpenCode Zen'}],
+                'agents': [{'id': 'taizi', 'label': '太子', 'role': '太子', 'emoji': '🤴', 'model': 'opencode/big-pickle'}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding='utf-8',
+    )
+
+    monkeypatch.setenv('EDICT_RUNTIME', 'opencode')
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, 'PROJECT_ROOT', tmp_path)
+    monkeypatch.setattr(srv, '_check_gateway_alive', lambda: True)
+    monkeypatch.setattr(srv, '_check_gateway_probe', lambda: True)
+    monkeypatch.setattr(srv, '_resolve_opencode_bin', lambda: '/tmp/opencode')
+    monkeypatch.setattr(srv, '_opencode_cli_model_entries', lambda force=False: (
+        [{'id': 'opencode/big-pickle', 'label': 'Big Pickle', 'provider': 'OpenCode Zen', 'source': 'opencode-cli'}],
+        {'id': 'opencode-cli', 'label': 'OpenCode CLI', 'ok': True, 'count': 1, 'latencyMs': 4, 'error': ''},
+    ))
+    monkeypatch.setattr(srv, '_opencode_provider_model_entries', lambda: (
+        [],
+        {'id': 'opencode-server', 'label': 'OpenCode Server', 'ok': True, 'count': 0, 'latencyMs': 2, 'error': ''},
+    ))
+    monkeypatch.setattr(
+        srv,
+        '_run_model_probe_capture',
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, '{"type":"done"}\n', ''),
+    )
+
+    result = srv._probe_model_once('opencode/big-pickle', timeout_sec=10)
+    assert result['ok'] is True
+    assert result['status'] == 'ok'
+    assert isinstance(result['latencyMs'], int)
+
+    srv._record_model_probe('opencode/big-pickle', result['status'], latency_ms=211, source='test-probe')
+    registry = srv.get_model_registry(force=False)
+    item = next(model for model in registry['models'] if model['id'] == 'opencode/big-pickle')
+    health = srv.get_model_health()
+    taizi = next(agent for agent in health['agents'] if agent['agentId'] == 'taizi')
+
+    assert item['latencyMs'] == 211
+    assert item['latencyLabel'] == '快'
+    assert item['latencySource'] == 'test-probe'
+    assert registry['summary']['measured'] == 1
+    assert taizi['lastLatencyMs'] == 211
+    assert taizi['source'] == 'model_probe'
+
+
+def test_run_model_probes_now_starts_background_batch(monkeypatch, tmp_path):
+    """Manual probe requests should return immediately with a running queue."""
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    (data_dir / 'agent_config.json').write_text(
+        json.dumps({'runtime': 'opencode', 'knownModels': [], 'agents': []}, ensure_ascii=False),
+        encoding='utf-8',
+    )
+
+    monkeypatch.setenv('EDICT_RUNTIME', 'opencode')
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, 'PROJECT_ROOT', tmp_path)
+    monkeypatch.setattr(srv, '_opencode_cli_model_entries', lambda force=False: (
+        [{'id': 'opencode/big-pickle', 'label': 'Big Pickle', 'provider': 'OpenCode Zen', 'source': 'opencode-cli'}],
+        {'id': 'opencode-cli', 'label': 'OpenCode CLI', 'ok': True, 'count': 1, 'latencyMs': 4, 'error': ''},
+    ))
+    monkeypatch.setattr(srv, '_opencode_provider_model_entries', lambda: (
+        [],
+        {'id': 'opencode-server', 'label': 'OpenCode Server', 'ok': True, 'count': 0, 'latencyMs': 2, 'error': ''},
+    ))
+
+    calls = []
+
+    class ImmediateThread:
+        def __init__(self, target, args=(), kwargs=None, **_):
+            self.target = target
+            self.args = args
+            self.kwargs = kwargs or {}
+
+        def start(self):
+            calls.append(self.args[0])
+
+    monkeypatch.setattr(srv, '_REAL_THREAD', ImmediateThread)
+
+    result = srv.run_model_probes_now({'modelIds': ['opencode/big-pickle'], 'timeoutSec': 10})
+
+    assert result['ok'] is True
+    assert result['started'] is True
+    assert result['count'] == 1
+    assert calls == [['opencode/big-pickle']]
+
+
 def test_model_registry_hides_agent_config_only_legacy_models(monkeypatch, tmp_path):
     """Legacy OpenClaw/Copilot leftovers should not appear when OpenCode has a live catalog."""
     import server as srv

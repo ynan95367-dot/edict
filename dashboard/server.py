@@ -88,6 +88,14 @@ _REFRESH_TIMER_LOCK = threading.Lock()
 _REFRESH_DEBOUNCE_SEC = 1.5
 _DISPATCH_WORKER_LOCK = threading.Lock()
 _DISPATCH_WORKER_ACTIVE = False
+_MODEL_PROBE_THREAD = None
+_MODEL_PROBE_LOCK = threading.Lock()
+_MODEL_PROBE_STOP = threading.Event()
+_MODEL_PROBE_RUNNING = False
+_MODEL_PROBE_PROCESS = None
+_MODEL_PROBE_DEFAULT_INTERVAL_SEC = 300
+_MODEL_PROBE_DEFAULT_TIMEOUT_SEC = 25
+_MODEL_PROBE_PROMPT = 'Reply exactly: ok'
 _DISPATCH_WORKER_ID = f'dashboard-{os.getpid()}'
 _DISPATCH_WORKER_STARTED_AT = ''
 _DISPATCH_WORKER_HEARTBEAT_AT = ''
@@ -3808,6 +3816,7 @@ def get_model_health():
     known = _known_model_entries(cfg)
     health = _read_model_health()
     records = health.get('records') or {}
+    probe_latency = _model_probe_latency_snapshot()
     runtime = _agent_runtime()
     gateway_alive = _check_gateway_alive()
     gateway_probe = _check_gateway_probe() if gateway_alive else False
@@ -3822,7 +3831,8 @@ def get_model_health():
         key = _model_health_key(agent_id, model_id)
         rec = records.get(key) if isinstance(records.get(key), dict) else {}
         outbox_signal = {} if rec else _latest_outbox_model_signal(agent_id, model_id)
-        status = rec.get('status') or outbox_signal.get('status') or 'unknown'
+        probe_signal = probe_latency.get(model_id) or {}
+        status = rec.get('status') or outbox_signal.get('status') or probe_signal.get('status') or 'unknown'
         if not gateway_alive:
             status = 'offline'
         elif status in {'failed', 'timeout', 'degraded'}:
@@ -3844,20 +3854,20 @@ def get_model_health():
             'tierLabel': _model_tier_label(tier),
             'status': status,
             'statusLabel': _model_status_label(status),
-            'lastError': rec.get('lastError') or outbox_signal.get('lastError') or '',
-            'lastFailureAt': rec.get('lastFailureAt') or outbox_signal.get('lastFailureAt') or '',
-            'lastSuccessAt': rec.get('lastSuccessAt') or '',
+            'lastError': rec.get('lastError') or outbox_signal.get('lastError') or probe_signal.get('lastError') or '',
+            'lastFailureAt': rec.get('lastFailureAt') or outbox_signal.get('lastFailureAt') or (probe_signal.get('updatedAt') if status != 'ok' else '') or '',
+            'lastSuccessAt': rec.get('lastSuccessAt') or (probe_signal.get('updatedAt') if status == 'ok' else '') or '',
             'failureCount': int(rec.get('failureCount') or (1 if outbox_signal else 0)),
             'timeoutCount': int(rec.get('timeoutCount') or 0),
             'successCount': int(rec.get('successCount') or 0),
-            'lastLatencyMs': rec.get('lastLatencyMs'),
-            'averageLatencyMs': rec.get('averageLatencyMs'),
-            'latencyCount': int(rec.get('latencyCount') or 0),
+            'lastLatencyMs': rec.get('lastLatencyMs') if isinstance(rec.get('lastLatencyMs'), (int, float)) else probe_signal.get('latencyMs'),
+            'averageLatencyMs': rec.get('averageLatencyMs') if isinstance(rec.get('averageLatencyMs'), (int, float)) else probe_signal.get('averageLatencyMs'),
+            'latencyCount': int(rec.get('latencyCount') or probe_signal.get('latencyCount') or 0),
             'fallbackModel': rec.get('fallbackModel') or fallback,
             'fallbackLabel': _model_label(rec.get('fallbackModel') or fallback, known) if (rec.get('fallbackModel') or fallback) else '',
             'lastTaskId': rec.get('lastTaskId') or outbox_signal.get('lastTaskId') or '',
             'lastDispatchId': rec.get('lastDispatchId') or outbox_signal.get('lastDispatchId') or '',
-            'source': 'model_health' if rec else (outbox_signal.get('source') or 'config'),
+            'source': 'model_health' if rec else (outbox_signal.get('source') or ('model_probe' if probe_signal else 'config')),
         })
 
     return {
@@ -4116,6 +4126,515 @@ def _model_health_latency_snapshot(health=None):
     return by_model
 
 
+def _model_probe_file():
+    return DATA / 'model_probes.json'
+
+
+def _empty_model_probe_state():
+    return {
+        'version': 1,
+        'updatedAt': now_iso(),
+        'config': {
+            'enabled': False,
+            'intervalSec': _MODEL_PROBE_DEFAULT_INTERVAL_SEC,
+            'timeoutSec': _MODEL_PROBE_DEFAULT_TIMEOUT_SEC,
+            'modelIds': [],
+        },
+        'running': False,
+        'currentModel': '',
+        'queue': [],
+        'lastStartedAt': '',
+        'lastFinishedAt': '',
+        'records': {},
+        'events': [],
+    }
+
+
+def _read_model_probe_state():
+    data = atomic_json_read(_model_probe_file(), _empty_model_probe_state())
+    if not isinstance(data, dict):
+        data = _empty_model_probe_state()
+    data.setdefault('version', 1)
+    data.setdefault('updatedAt', now_iso())
+    config = data.get('config') if isinstance(data.get('config'), dict) else {}
+    config.setdefault('enabled', False)
+    config.setdefault('intervalSec', _MODEL_PROBE_DEFAULT_INTERVAL_SEC)
+    config.setdefault('timeoutSec', _MODEL_PROBE_DEFAULT_TIMEOUT_SEC)
+    config.setdefault('modelIds', [])
+    if not isinstance(config.get('modelIds'), list):
+        config['modelIds'] = []
+    data['config'] = config
+    if not isinstance(data.get('records'), dict):
+        data['records'] = {}
+    if not isinstance(data.get('events'), list):
+        data['events'] = []
+    if not isinstance(data.get('queue'), list):
+        data['queue'] = []
+    data.setdefault('running', False)
+    data.setdefault('currentModel', '')
+    data.setdefault('lastStartedAt', '')
+    data.setdefault('lastFinishedAt', '')
+    return data
+
+
+def _bounded_int(value, default, minimum, maximum):
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _invalidate_model_registry_cache():
+    try:
+        _model_registry_file().unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _model_probe_signal_from_record(rec):
+    if not isinstance(rec, dict):
+        return {}
+    latency = rec.get('latencyMs')
+    if not isinstance(latency, (int, float)):
+        latency = rec.get('averageLatencyMs')
+    status = rec.get('status') or 'unknown'
+    return {
+        'status': status,
+        'statusLabel': rec.get('statusLabel') or _model_status_label(status),
+        'latencyMs': int(latency) if isinstance(latency, (int, float)) else None,
+        'averageLatencyMs': int(rec.get('averageLatencyMs')) if isinstance(rec.get('averageLatencyMs'), (int, float)) else None,
+        'latencyCount': int(rec.get('latencyCount') or 0),
+        'updatedAt': rec.get('updatedAt') or '',
+        'lastError': rec.get('lastError') or '',
+        'source': rec.get('source') or 'active-probe',
+    }
+
+
+def _model_probe_latency_snapshot(state=None):
+    state = state or _read_model_probe_state()
+    records = state.get('records') if isinstance(state.get('records'), dict) else {}
+    by_model = {}
+    for model_id, rec in records.items():
+        model_id = str(model_id or '').strip()
+        if not model_id:
+            continue
+        signal = _model_probe_signal_from_record(rec)
+        if signal:
+            by_model[model_id] = signal
+    return by_model
+
+
+def _newer_model_signal(primary, secondary):
+    primary = primary if isinstance(primary, dict) else {}
+    secondary = secondary if isinstance(secondary, dict) else {}
+    if not primary:
+        return secondary
+    if not secondary:
+        return primary
+    p_time = str(primary.get('updatedAt') or '')
+    s_time = str(secondary.get('updatedAt') or '')
+    if s_time and (not p_time or s_time >= p_time):
+        merged = dict(primary)
+        merged.update({k: v for k, v in secondary.items() if v not in (None, '')})
+        return merged
+    merged = dict(secondary)
+    merged.update({k: v for k, v in primary.items() if v not in (None, '')})
+    return merged
+
+
+def _normalize_probe_model_ids(model_ids=None, registry=None, limit=160):
+    registry = registry if isinstance(registry, dict) else get_model_registry(force=False)
+    available = [
+        str(item.get('id') or '').strip()
+        for item in registry.get('models', []) if isinstance(item, dict) and item.get('id')
+    ]
+    available_set = set(available)
+    source = model_ids if isinstance(model_ids, list) and model_ids else available
+    normalized = []
+    seen = set()
+    for model_id in source:
+        model_id = str(model_id or '').strip()
+        if not model_id or model_id in seen:
+            continue
+        if available_set and model_id not in available_set:
+            continue
+        seen.add(model_id)
+        normalized.append(model_id)
+        if len(normalized) >= limit:
+            break
+    return normalized
+
+
+def _set_model_probe_run_state(*, running=None, queue=None, current_model=None, started=False, finished=False):
+    at = now_iso()
+
+    def _update(data):
+        data = data if isinstance(data, dict) else _empty_model_probe_state()
+        if running is not None:
+            data['running'] = bool(running)
+        if queue is not None:
+            data['queue'] = queue if isinstance(queue, list) else []
+        if current_model is not None:
+            data['currentModel'] = str(current_model or '')
+        if started:
+            data['lastStartedAt'] = at
+        if finished:
+            data['lastFinishedAt'] = at
+            data['currentModel'] = ''
+            data['queue'] = []
+        data['updatedAt'] = at
+        return data
+
+    return atomic_json_update(_model_probe_file(), _update, _empty_model_probe_state())
+
+
+def _record_model_probe(model_id, status, *, latency_ms=None, error='', source='active-probe'):
+    model_id = str(model_id or '').strip()
+    if not model_id:
+        return {}
+    normalized = _normalize_model_status(status, error)
+    at = now_iso()
+
+    def _update(data):
+        data = data if isinstance(data, dict) else _empty_model_probe_state()
+        records = data.get('records') if isinstance(data.get('records'), dict) else {}
+        rec = records.get(model_id) if isinstance(records.get(model_id), dict) else {}
+        rec.update({
+            'model': model_id,
+            'status': normalized,
+            'statusLabel': _model_status_label(normalized),
+            'updatedAt': at,
+            'source': source,
+        })
+        try:
+            if latency_ms is not None:
+                last_latency = max(0, int(latency_ms))
+                prev_avg = rec.get('averageLatencyMs')
+                prev_count = int(rec.get('latencyCount') or 0)
+                if isinstance(prev_avg, (int, float)) and prev_count > 0:
+                    rec['averageLatencyMs'] = int(((float(prev_avg) * prev_count) + last_latency) / (prev_count + 1))
+                else:
+                    rec['averageLatencyMs'] = last_latency
+                rec['latencyMs'] = last_latency
+                rec['latencyCount'] = prev_count + 1
+        except Exception:
+            pass
+        if normalized == 'ok':
+            rec['lastSuccessAt'] = at
+            rec['successCount'] = int(rec.get('successCount') or 0) + 1
+            rec['lastError'] = ''
+        else:
+            rec['lastFailureAt'] = at
+            rec['lastError'] = _clean_runtime_error(error, limit=500)
+            rec['failureCount'] = int(rec.get('failureCount') or 0) + 1
+            if normalized == 'timeout':
+                rec['timeoutCount'] = int(rec.get('timeoutCount') or 0) + 1
+        records[model_id] = rec
+        events = data.get('events') if isinstance(data.get('events'), list) else []
+        events.append({
+            'at': at,
+            'model': model_id,
+            'status': normalized,
+            'latencyMs': rec.get('latencyMs'),
+            'error': rec.get('lastError') or '',
+            'source': source,
+        })
+        data.update({'version': 1, 'updatedAt': at, 'records': records, 'events': events[-600:]})
+        return data
+
+    updated = atomic_json_update(_model_probe_file(), _update, _empty_model_probe_state())
+    _invalidate_model_registry_cache()
+    return (updated.get('records') or {}).get(model_id, {}) if isinstance(updated, dict) else {}
+
+
+def _terminate_model_probe_process(proc, *, kill=False):
+    if not proc or proc.poll() is not None:
+        return
+    if os.name != 'nt':
+        try:
+            os.killpg(proc.pid, signal.SIGKILL if kill else signal.SIGTERM)
+            return
+        except Exception:
+            pass
+    try:
+        proc.kill() if kill else proc.terminate()
+    except Exception:
+        pass
+
+
+def _run_model_probe_capture(cmd, *, timeout, env=None, cwd=None):
+    global _MODEL_PROBE_PROCESS
+    stopped = threading.Event()
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=(os.name != 'nt'),
+    )
+    with _MODEL_PROBE_LOCK:
+        _MODEL_PROBE_PROCESS = proc
+
+    def _watch_stop():
+        while proc.poll() is None:
+            if _MODEL_PROBE_STOP.wait(0.2):
+                stopped.set()
+                _terminate_model_probe_process(proc)
+                return
+
+    watcher = _REAL_THREAD(target=_watch_stop, name='model-probe-stop-watcher', daemon=True)
+    watcher.start()
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        if stopped.is_set():
+            stderr = f'{stderr or ""}\nprobe stopped by user'.strip()
+            return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_model_probe_process(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            _terminate_model_probe_process(proc, kill=True)
+            stdout, stderr = proc.communicate()
+        exc.output = stdout
+        exc.stderr = stderr
+        raise exc
+    finally:
+        with _MODEL_PROBE_LOCK:
+            if _MODEL_PROBE_PROCESS is proc:
+                _MODEL_PROBE_PROCESS = None
+
+
+def _probe_model_once(model_id, timeout_sec=None):
+    model_id = str(model_id or '').strip()
+    timeout_sec = _bounded_int(timeout_sec, _MODEL_PROBE_DEFAULT_TIMEOUT_SEC, 5, 120)
+    if not model_id:
+        return {'ok': False, 'model': '', 'status': 'failed', 'latencyMs': None, 'error': 'model required'}
+    bin_path = _resolve_opencode_bin()
+    if not bin_path:
+        return {'ok': False, 'model': model_id, 'status': 'offline', 'latencyMs': None, 'error': 'OpenCode CLI 未找到'}
+    started = time.perf_counter()
+    env = os.environ.copy()
+    env.setdefault('EDICT_RUNTIME', 'opencode')
+    env.setdefault('EDICT_AGENT_RUNTIME', 'opencode')
+    env.setdefault('OPENCODE_SERVER_URL', _opencode_server_url())
+    cmd = [
+        bin_path,
+        'run',
+        '--attach',
+        _opencode_server_url(),
+        '--dir',
+        str(PROJECT_ROOT),
+        '--agent',
+        'taizi',
+        '--model',
+        model_id,
+        '--format',
+        'json',
+        '--title',
+        f'model probe {model_id}',
+        _MODEL_PROBE_PROMPT,
+    ]
+    try:
+        proc = _run_model_probe_capture(cmd, timeout=timeout_sec, env=env, cwd=str(PROJECT_ROOT))
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        if proc.returncode == 0:
+            return {'ok': True, 'model': model_id, 'status': 'ok', 'latencyMs': latency_ms, 'error': ''}
+        raw_error = proc.stderr or proc.stdout or f'exit {proc.returncode}'
+        error = _runtime_error_summary(raw_error, default=f'OpenCode probe failed: exit {proc.returncode}', limit=500)
+        if 'probe stopped by user' in str(raw_error).lower():
+            return {'ok': False, 'model': model_id, 'status': 'stopped', 'latencyMs': latency_ms, 'error': 'probe stopped by user'}
+        status = 'timeout' if _MODEL_TIMEOUT_RE.search(error) else 'failed'
+        if 'not supported' in error.lower() or 'model' in error.lower() and 'not' in error.lower():
+            status = 'failed'
+        return {'ok': False, 'model': model_id, 'status': status, 'latencyMs': latency_ms, 'error': error}
+    except subprocess.TimeoutExpired as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        error = _runtime_error_summary((exc.stderr or '') + '\n' + (exc.output or ''), default=f'probe timeout after {timeout_sec}s', limit=500)
+        return {'ok': False, 'model': model_id, 'status': 'timeout', 'latencyMs': latency_ms, 'error': error}
+    except Exception as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        return {'ok': False, 'model': model_id, 'status': 'failed', 'latencyMs': latency_ms, 'error': _clean_runtime_error(str(exc), limit=500)}
+
+
+def _run_model_probe_batch(model_ids, *, timeout_sec=None, mode='manual'):
+    global _MODEL_PROBE_RUNNING
+    timeout_sec = _bounded_int(timeout_sec, _MODEL_PROBE_DEFAULT_TIMEOUT_SEC, 5, 120)
+    model_ids = _normalize_probe_model_ids(model_ids)
+    with _MODEL_PROBE_LOCK:
+        if _MODEL_PROBE_RUNNING:
+            return {'ok': False, 'running': True, 'error': 'model probe already running'}
+        _MODEL_PROBE_RUNNING = True
+    _set_model_probe_run_state(running=True, queue=model_ids, current_model='', started=True)
+    finished = []
+    try:
+        for index, model_id in enumerate(model_ids):
+            if _MODEL_PROBE_STOP.is_set():
+                break
+            remaining = model_ids[index:]
+            _set_model_probe_run_state(running=True, queue=remaining, current_model=model_id)
+            result = _probe_model_once(model_id, timeout_sec=timeout_sec)
+            if result.get('status') != 'stopped':
+                _record_model_probe(
+                    model_id,
+                    result.get('status') or ('ok' if result.get('ok') else 'failed'),
+                    latency_ms=result.get('latencyMs'),
+                    error=result.get('error') or '',
+                    source='continuous-probe' if mode == 'continuous' else 'manual-probe',
+                )
+            finished.append(result)
+            time.sleep(0.15)
+    finally:
+        with _MODEL_PROBE_LOCK:
+            _MODEL_PROBE_RUNNING = False
+        _set_model_probe_run_state(running=False, queue=[], current_model='', finished=True)
+    return {'ok': True, 'running': False, 'count': len(finished), 'results': finished[-20:]}
+
+
+def _start_model_probe_batch(model_ids=None, *, timeout_sec=None, mode='manual'):
+    registry = get_model_registry(force=False)
+    normalized = _normalize_probe_model_ids(model_ids, registry=registry)
+    if not normalized:
+        return {'ok': False, 'error': '没有可观测模型'}
+    with _MODEL_PROBE_LOCK:
+        if _MODEL_PROBE_RUNNING:
+            return {'ok': True, 'started': False, 'running': True, 'message': '模型观测正在运行'}
+        _MODEL_PROBE_STOP.clear()
+    thread = _REAL_THREAD(
+        target=_run_model_probe_batch,
+        args=(normalized,),
+        kwargs={'timeout_sec': timeout_sec, 'mode': mode},
+        name='model-probe-batch',
+        daemon=True,
+    )
+    thread.start()
+    return {'ok': True, 'started': True, 'running': True, 'count': len(normalized), 'probes': get_model_probes()}
+
+
+def _model_probe_observer_loop():
+    while not _MODEL_PROBE_STOP.is_set():
+        state = _read_model_probe_state()
+        config = state.get('config') if isinstance(state.get('config'), dict) else {}
+        if not config.get('enabled'):
+            break
+        interval_sec = _bounded_int(config.get('intervalSec'), _MODEL_PROBE_DEFAULT_INTERVAL_SEC, 30, 3600)
+        timeout_sec = _bounded_int(config.get('timeoutSec'), _MODEL_PROBE_DEFAULT_TIMEOUT_SEC, 5, 120)
+        model_ids = config.get('modelIds') if isinstance(config.get('modelIds'), list) else []
+        _run_model_probe_batch(model_ids, timeout_sec=timeout_sec, mode='continuous')
+        slept = 0
+        while slept < interval_sec and not _MODEL_PROBE_STOP.is_set():
+            time.sleep(min(2, interval_sec - slept))
+            slept += 2
+
+
+def _ensure_model_probe_observer():
+    global _MODEL_PROBE_THREAD
+    with _MODEL_PROBE_LOCK:
+        alive = _MODEL_PROBE_THREAD is not None and _MODEL_PROBE_THREAD.is_alive()
+        if alive:
+            return True
+        _MODEL_PROBE_STOP.clear()
+        _MODEL_PROBE_THREAD = _REAL_THREAD(target=_model_probe_observer_loop, name='model-probe-observer', daemon=True)
+        _MODEL_PROBE_THREAD.start()
+        return True
+
+
+def start_model_probes(body=None):
+    body = body if isinstance(body, dict) else {}
+    registry = get_model_registry(force=False)
+    model_ids = _normalize_probe_model_ids(body.get('modelIds') if isinstance(body.get('modelIds'), list) else [], registry=registry)
+    interval_sec = _bounded_int(body.get('intervalSec'), _MODEL_PROBE_DEFAULT_INTERVAL_SEC, 30, 3600)
+    timeout_sec = _bounded_int(body.get('timeoutSec'), _MODEL_PROBE_DEFAULT_TIMEOUT_SEC, 5, 120)
+    at = now_iso()
+
+    def _update(data):
+        data = data if isinstance(data, dict) else _empty_model_probe_state()
+        config = data.get('config') if isinstance(data.get('config'), dict) else {}
+        config.update({
+            'enabled': True,
+            'intervalSec': interval_sec,
+            'timeoutSec': timeout_sec,
+            'modelIds': model_ids,
+        })
+        data['config'] = config
+        data['updatedAt'] = at
+        return data
+
+    atomic_json_update(_model_probe_file(), _update, _empty_model_probe_state())
+    _ensure_model_probe_observer()
+    return {'ok': True, 'message': '持续观测已开启', 'probes': get_model_probes()}
+
+
+def stop_model_probes():
+    _MODEL_PROBE_STOP.set()
+    with _MODEL_PROBE_LOCK:
+        proc = _MODEL_PROBE_PROCESS
+    _terminate_model_probe_process(proc)
+    at = now_iso()
+
+    def _update(data):
+        data = data if isinstance(data, dict) else _empty_model_probe_state()
+        config = data.get('config') if isinstance(data.get('config'), dict) else {}
+        config['enabled'] = False
+        data['config'] = config
+        data['updatedAt'] = at
+        return data
+
+    atomic_json_update(_model_probe_file(), _update, _empty_model_probe_state())
+    return {'ok': True, 'message': '模型观测已停止', 'probes': get_model_probes()}
+
+
+def run_model_probes_now(body=None):
+    body = body if isinstance(body, dict) else {}
+    timeout_sec = _bounded_int(body.get('timeoutSec'), _MODEL_PROBE_DEFAULT_TIMEOUT_SEC, 5, 120)
+    model_ids = body.get('modelIds') if isinstance(body.get('modelIds'), list) else []
+    return _start_model_probe_batch(model_ids, timeout_sec=timeout_sec, mode='manual')
+
+
+def get_model_probes():
+    state = _read_model_probe_state()
+    running = bool(_MODEL_PROBE_RUNNING)
+    if state.get('running') and not running:
+        state = _set_model_probe_run_state(running=False, queue=[], current_model='', finished=True)
+    records = state.get('records') if isinstance(state.get('records'), dict) else {}
+    statuses = {'ok': 0, 'timeout': 0, 'failed': 0, 'degraded': 0, 'offline': 0, 'unknown': 0}
+    measured = 0
+    for rec in records.values():
+        if not isinstance(rec, dict):
+            continue
+        status = rec.get('status') or 'unknown'
+        statuses[status if status in statuses else 'unknown'] += 1
+        if isinstance(rec.get('latencyMs'), (int, float)):
+            measured += 1
+    recent = sorted(
+        [rec for rec in records.values() if isinstance(rec, dict)],
+        key=lambda rec: rec.get('updatedAt') or '',
+        reverse=True,
+    )[:80]
+    return {
+        'ok': True,
+        'generatedAt': now_iso(),
+        'running': running,
+        'currentModel': state.get('currentModel') or '',
+        'queue': state.get('queue') if isinstance(state.get('queue'), list) else [],
+        'lastStartedAt': state.get('lastStartedAt') or '',
+        'lastFinishedAt': state.get('lastFinishedAt') or '',
+        'config': state.get('config') if isinstance(state.get('config'), dict) else {},
+        'summary': {
+            'total': len(records),
+            'measured': measured,
+            'unmeasured': max(0, len(records) - measured),
+            'statuses': statuses,
+        },
+        'records': records,
+        'recent': recent,
+    }
+
+
 def _merge_model_registry_entries(groups):
     merged = {}
     order = []
@@ -4183,6 +4702,7 @@ def get_model_registry(force=False):
     known = _known_model_entries(cfg)
     health = _read_model_health()
     latency = _model_health_latency_snapshot(health)
+    probe_latency = _model_probe_latency_snapshot()
     cli_entries, cli_source = _opencode_cli_model_entries(force=force)
     provider_entries, provider_source = _opencode_provider_model_entries()
     manual_entries = _read_custom_models(mask=True)
@@ -4205,7 +4725,7 @@ def get_model_registry(force=False):
     for item in models:
         model_id = item.get('id')
         tier = _model_tier(model_id)
-        signal = latency.get(model_id) or {}
+        signal = _newer_model_signal(latency.get(model_id) or {}, probe_latency.get(model_id) or {})
         status = signal.get('status') or _recent_model_record_status(model_id, health) or 'unknown'
         item.update({
             'tier': tier,
@@ -4220,6 +4740,7 @@ def get_model_registry(force=False):
             'lastError': signal.get('lastError') or '',
             'lastTaskId': signal.get('lastTaskId') or '',
             'lastDispatchId': signal.get('lastDispatchId') or '',
+            'latencySource': signal.get('source') or '',
         })
         item['source'] = item['sources'][0] if item.get('sources') else item.get('source') or 'unknown'
     models.sort(key=lambda item: (
@@ -8833,6 +9354,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(get_agent_config_response(force=force_refresh))
         elif p == '/api/model-health':
             self.send_json(get_model_health())
+        elif p == '/api/model-probes':
+            self.send_json(get_model_probes())
         elif p == '/api/model-registry':
             force_refresh = (qs.get('refresh') or [''])[0] in {'1', 'true', 'yes'}
             self.send_json(get_model_registry(force=force_refresh))
@@ -9354,6 +9877,21 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == '/api/model-registry/custom':
             result = add_custom_model_to_registry(body)
+            self.send_json(result, 200 if result.get('ok') else 400)
+            return
+
+        if p == '/api/model-probes/run':
+            result = run_model_probes_now(body)
+            self.send_json(result, 200 if result.get('ok') else 400)
+            return
+
+        if p == '/api/model-probes/start':
+            result = start_model_probes(body)
+            self.send_json(result, 200 if result.get('ok') else 400)
+            return
+
+        if p == '/api/model-probes/stop':
+            result = stop_model_probes()
             self.send_json(result, 200 if result.get('ok') else 400)
             return
 

@@ -5,6 +5,7 @@ import {
   type AgentConfig,
   type ModelHealthAgent,
   type ModelHealthData,
+  type ModelProbeData,
   type ModelRegistryData,
   type ModelRegistryEntry,
 } from '../api';
@@ -93,6 +94,12 @@ const formatLatency = (value?: number | null) => {
   return `${(value / 1000).toFixed(value < 10000 ? 1 : 0)}s`;
 };
 
+const formatInterval = (value?: number) => {
+  if (!value) return '未设置';
+  if (value < 60) return `${value}s`;
+  return `${Math.round(value / 60)}min`;
+};
+
 const buildModelOptions = (agentConfig: AgentConfig) => {
   const options: ModelOption[] = agentConfig.knownModels?.length
     ? agentConfig.knownModels.map((m) => ({ id: m.id, l: m.label || labelForModel(m.id), p: m.provider || providerForModel(m.id) }))
@@ -152,6 +159,9 @@ export default function ModelConfig() {
   const [registry, setRegistry] = useState<ModelRegistryData | null>(null);
   const [registryError, setRegistryError] = useState('');
   const [registryLoading, setRegistryLoading] = useState(false);
+  const [probe, setProbe] = useState<ModelProbeData | null>(null);
+  const [probeError, setProbeError] = useState('');
+  const [probeLoading, setProbeLoading] = useState('');
   const [modelQuery, setModelQuery] = useState('');
   const [customModel, setCustomModel] = useState({
     providerId: 'openrouter',
@@ -194,11 +204,32 @@ export default function ModelConfig() {
     }
   };
 
+  const loadProbes = async () => {
+    try {
+      const data = await api.modelProbes();
+      setProbe(data);
+      setProbeError('');
+    } catch {
+      setProbeError('模型观测接口不可达');
+    }
+  };
+
   useEffect(() => {
     loadAgentConfig();
     loadHealth();
     loadRegistry(false);
+    loadProbes();
   }, [loadAgentConfig]);
+
+  useEffect(() => {
+    const active = Boolean(probe?.running || probe?.config?.enabled);
+    const timer = window.setInterval(async () => {
+      await loadProbes();
+      await loadRegistry(false);
+      if (active) await loadHealth();
+    }, active ? 4000 : 15000);
+    return () => window.clearInterval(timer);
+  }, [probe?.running, probe?.config?.enabled]);
 
   useEffect(() => {
     if (agentConfig?.agents) {
@@ -260,6 +291,12 @@ export default function ModelConfig() {
     });
   }, [registry, modelQuery]);
 
+  const probeSummary = probe?.summary;
+  const probeRunning = Boolean(probe?.running);
+  const probeEnabled = Boolean(probe?.config?.enabled);
+  const probeShouldStop = probeRunning || probeEnabled;
+  const probeQueueCount = probe?.queue?.length || 0;
+
   if (!agentConfig?.agents) {
     return <div className="empty" style={{ gridColumn: '1/-1' }}>⚠️ 请先启动本地服务器</div>;
   }
@@ -270,7 +307,51 @@ export default function ModelConfig() {
 
   const refreshRegistry = async () => {
     await loadRegistry(true);
+    await loadProbes();
     toast('OpenCode 模型已同步', 'ok');
+  };
+
+  const runProbe = async (mode: 'all' | 'visible') => {
+    const modelIds = mode === 'visible' ? visibleRegistryModels.map((m) => m.id) : [];
+    setProbeLoading(mode);
+    try {
+      const result = await api.runModelProbes({ modelIds, timeoutSec: 25 });
+      if (!result.ok) {
+        setProbeError(result.error || '无法启动模型观测');
+        return;
+      }
+      if (result.probes) setProbe(result.probes);
+      await loadRegistry(false);
+      toast(result.started === false ? '模型观测已在运行' : `已开始观测 ${result.count || modelIds.length || registry?.summary?.total || models.length} 个模型`, 'ok');
+    } catch {
+      setProbeError('无法启动模型观测');
+    } finally {
+      setProbeLoading('');
+    }
+  };
+
+  const toggleContinuousProbe = async () => {
+    setProbeLoading('continuous');
+    try {
+      const result = probeShouldStop
+        ? await api.stopModelProbes()
+        : await api.startModelProbes({
+          modelIds: modelQuery.trim() ? visibleRegistryModels.map((m) => m.id) : [],
+          intervalSec: 300,
+          timeoutSec: 25,
+        });
+      if (!result.ok) {
+        setProbeError(result.error || '无法切换持续观测');
+        return;
+      }
+      if (result.probes) setProbe(result.probes);
+      await loadRegistry(false);
+      toast(probeShouldStop ? '模型观测已停止' : '持续观测已开启', 'ok');
+    } catch {
+      setProbeError('无法切换持续观测');
+    } finally {
+      setProbeLoading('');
+    }
   };
 
   const updateCustom = (key: keyof typeof customModel, value: string) => {
@@ -365,7 +446,24 @@ export default function ModelConfig() {
           ))}
         </div>
 
-        {registryError && <div className="mh-error">{registryError}</div>}
+        <div className="mr-probe-strip">
+          <div className={`mr-probe-state ${probeRunning ? 'running' : probeEnabled ? 'enabled' : ''}`}>
+            <span>{probeRunning ? '正在观测' : probeEnabled ? '持续观测已开' : '观测已停止'}</span>
+            <b>{probe?.currentModel ? labelForModel(probe.currentModel) : probeQueueCount ? `${probeQueueCount} 个排队` : '空闲'}</b>
+            <small>间隔 {formatInterval(probe?.config?.intervalSec)} · 已测 {probeSummary?.measured || registry?.summary?.measured || 0}</small>
+          </div>
+          <button className="btn btn-g" onClick={() => runProbe('visible')} disabled={!!probeLoading || !visibleRegistryModels.length}>
+            {probeLoading === 'visible' ? '启动中' : '观测当前列表'}
+          </button>
+          <button className="btn btn-g" onClick={() => runProbe('all')} disabled={!!probeLoading || !(registry?.summary?.total || models.length)}>
+            {probeLoading === 'all' ? '启动中' : '观测全部'}
+          </button>
+          <button className={probeShouldStop ? 'btn btn-g' : 'btn btn-p'} onClick={toggleContinuousProbe} disabled={!!probeLoading}>
+            {probeLoading === 'continuous' ? '切换中' : probeShouldStop ? '停止观测' : '开启持续观测'}
+          </button>
+        </div>
+
+        {(registryError || probeError) && <div className="mh-error">{registryError || probeError}</div>}
 
         <div className="mr-tools">
           <input
@@ -402,7 +500,7 @@ export default function ModelConfig() {
                     </div>
                     <div className="mr-latency">
                       <b>{formatLatency(item.latencyMs)}</b>
-                      <small>{item.latencyLabel || '未观测'}</small>
+                      <small>{item.latencyLabel || '未观测'}{item.lastMeasuredAt ? ` · ${shortTime(item.lastMeasuredAt)}` : ''}</small>
                     </div>
                     <div className="mr-status-cell">
                       <span className={`mh-pill mini ${cls}`}>{item.statusLabel || STATUS_TEXT.unknown}</span>

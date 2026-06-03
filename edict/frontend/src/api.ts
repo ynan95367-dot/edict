@@ -30,10 +30,20 @@ export const api = {
   agentConfig: (refresh = false) =>
     fetchJ<AgentConfig>(`${API_BASE}/api/agent-config${refresh ? '?refresh=1' : ''}`),
   modelHealth: () => fetchJ<ModelHealthData>(`${API_BASE}/api/model-health`),
+  modelProbes: () => fetchJ<ModelProbeData>(`${API_BASE}/api/model-probes`),
   modelRegistry: (refresh = false) =>
     fetchJ<ModelRegistryData>(`${API_BASE}/api/model-registry${refresh ? '?refresh=1' : ''}`),
   refreshModelRegistry: () =>
     postJ<ModelRegistryData>(`${API_BASE}/api/model-registry/refresh`, {}),
+  runModelProbes: (payload: ModelProbeRequest = {}) =>
+    postJ<ActionResult & { started?: boolean; running?: boolean; count?: number; probes?: ModelProbeData }>(
+      `${API_BASE}/api/model-probes/run`,
+      payload
+    ),
+  startModelProbes: (payload: ModelProbeRequest = {}) =>
+    postJ<ActionResult & { probes?: ModelProbeData }>(`${API_BASE}/api/model-probes/start`, payload),
+  stopModelProbes: () =>
+    postJ<ActionResult & { probes?: ModelProbeData }>(`${API_BASE}/api/model-probes/stop`, {}),
   addCustomModel: (payload: CustomModelPayload) =>
     postJ<ActionResult & { model?: ModelRegistryEntry; registry?: ModelRegistryData; restartRequired?: boolean }>(
       `${API_BASE}/api/model-registry/custom`,
@@ -490,6 +500,7 @@ export interface ModelRegistryEntry extends KnownModel {
   lastError?: string;
   lastTaskId?: string;
   lastDispatchId?: string;
+  latencySource?: string;
   context?: number;
   family?: string;
   apiURL?: string;
@@ -517,6 +528,53 @@ export interface ModelRegistryData {
   models: ModelRegistryEntry[];
   manualModels?: ModelRegistryEntry[];
   errors?: string[];
+}
+
+export interface ModelProbeRecord {
+  model: string;
+  status: string;
+  statusLabel?: string;
+  latencyMs?: number | null;
+  averageLatencyMs?: number | null;
+  latencyCount?: number;
+  updatedAt?: string;
+  lastSuccessAt?: string;
+  lastFailureAt?: string;
+  lastError?: string;
+  successCount?: number;
+  failureCount?: number;
+  timeoutCount?: number;
+  source?: string;
+}
+
+export interface ModelProbeData {
+  ok: boolean;
+  generatedAt: string;
+  running: boolean;
+  currentModel?: string;
+  queue?: string[];
+  lastStartedAt?: string;
+  lastFinishedAt?: string;
+  config?: {
+    enabled?: boolean;
+    intervalSec?: number;
+    timeoutSec?: number;
+    modelIds?: string[];
+  };
+  summary?: {
+    total: number;
+    measured: number;
+    unmeasured: number;
+    statuses?: Record<string, number>;
+  };
+  records?: Record<string, ModelProbeRecord>;
+  recent?: ModelProbeRecord[];
+}
+
+export interface ModelProbeRequest {
+  modelIds?: string[];
+  intervalSec?: number;
+  timeoutSec?: number;
 }
 
 export interface CustomModelPayload {
