@@ -68,6 +68,7 @@ const statusLabel: Record<string, string> = {
   created: '可分发',
   waiting_review: '等待审议',
   waiting_clarification: '等待补充',
+  waiting_policy_approval: '等待权限审批',
 };
 
 const availabilityFallback: Record<string, string> = {
@@ -213,6 +214,12 @@ export default function CommandCenter() {
   const previewStatus = previewRun?.status || 'preview';
   const capabilityPolicies = previewRun?.capabilityPolicies || selectedCaps;
   const hasToolPolicy = !!previewRun?.toolPolicy;
+  const policyGate = previewRun?.policyGate;
+  const gateDecision = policyGate?.decision || '';
+  const gateHeld = !!gateDecision && gateDecision !== 'auto_dispatch';
+  const gateNeedsReview = gateHeld || !!previewRun?.toolPolicy?.requiresApproval;
+  const gateLabel = !hasToolPolicy ? '等待目标' : policyGate?.label || (gateNeedsReview ? '需确认' : '可自动分发');
+  const gateReason = policyGate?.reason || previewRun?.toolPolicy?.approvalReason || '等待目标后自动生成权限摘要';
   const toolPermissions = previewRun?.toolPolicy?.permissionLabels?.length
     ? previewRun.toolPolicy.permissionLabels
     : Array.from(new Set(capabilityPolicies.flatMap((item) => permissionLabels(item))));
@@ -271,8 +278,11 @@ export default function CommandCenter() {
       if (result.ok && result.run) {
         setLastRun(result.run);
         const resolvedMode = result.run.mode || effectiveMode;
+        const resultGate = result.run.policyGate?.decision || '';
         toast(
-          resolvedMode === 'plan'
+          resultGate === 'hold_for_policy'
+            ? `${result.taskId} 已生成 RunSpec，等待权限审批`
+            : resolvedMode === 'plan'
             ? `${result.taskId} 已生成 RunSpec，等待审议`
             : resolvedMode === 'interactive'
               ? `${result.taskId} 已生成 RunSpec，等待补充确认`
@@ -511,7 +521,15 @@ export default function CommandCenter() {
 
         <button className="cmd-submit" type="submit" disabled={submitting || !goal.trim()}>
           {submitting ? <Workflow size={17} /> : <Send size={17} />}
-          {submitting ? '创建中' : effectiveMode === 'plan' ? '下达方案任务' : effectiveMode === 'interactive' ? '下达并等待确认' : '下达并分发'}
+          {submitting
+            ? '创建中'
+            : gateDecision === 'hold_for_policy'
+              ? '下达并等待审批'
+              : effectiveMode === 'plan'
+                ? '下达方案任务'
+                : effectiveMode === 'interactive'
+                  ? '下达并等待确认'
+                  : '下达并分发'}
         </button>
       </form>
 
@@ -559,10 +577,10 @@ export default function CommandCenter() {
         <div className="cmd-preview-block">
           <div className="cmd-block-title">工具权限</div>
           <div className="cmd-policy-head">
-            <span className={`cmd-policy-state ${hasToolPolicy && previewRun?.toolPolicy?.requiresApproval ? 'review' : 'auto'}`}>
-              {!hasToolPolicy ? '等待目标' : previewRun?.toolPolicy?.requiresApproval ? '需确认' : '可自动分发'}
+            <span className={`cmd-policy-state ${hasToolPolicy && gateNeedsReview ? 'review' : 'auto'}`}>
+              {gateLabel}
             </span>
-            <small>{previewRun?.toolPolicy?.approvalReason || '等待目标后自动生成权限摘要'}</small>
+            <small>{gateReason}</small>
           </div>
           <div className="cmd-policy-tags">
             {toolPermissions.length ? toolPermissions.slice(0, 8).map((item) => (
@@ -611,7 +629,7 @@ export default function CommandCenter() {
 
         <div className="cmd-preview-foot">
           <Play size={14} />
-          <span>系统会先生成 RunSpec；执行类任务进入分发，方案类任务等待审议。</span>
+          <span>系统会先生成 RunSpec；低风险自动分发，高风险命令、待配置能力和方案任务先进入审批。</span>
         </div>
       </aside>
     </div>

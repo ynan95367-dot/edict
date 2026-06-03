@@ -220,6 +220,7 @@ def test_dispatch_uses_opencode_run_attach(monkeypatch, tmp_path):
     monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
     monkeypatch.setattr(srv, '_check_gateway_alive', lambda: True)
     monkeypatch.setattr(srv, '_resolve_opencode_bin', lambda: '/usr/local/bin/opencode')
+    monkeypatch.setattr(srv, '_opencode_session_probe', lambda agent_id='taizi': True)
     monkeypatch.setattr(srv, '_opencode_session_error', lambda session_id: '')
     monkeypatch.setattr(
         srv,
@@ -301,6 +302,7 @@ def test_opencode_session_not_found_restarts_and_retries(monkeypatch, tmp_path):
     monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
     monkeypatch.setattr(srv, '_check_gateway_alive', lambda: True)
     monkeypatch.setattr(srv, '_resolve_opencode_bin', lambda: '/usr/local/bin/opencode')
+    monkeypatch.setattr(srv, '_opencode_session_probe', lambda agent_id='taizi': True)
     monkeypatch.setattr(srv, '_opencode_session_error', lambda session_id: '')
     monkeypatch.setattr(srv, '_trigger_refresh', lambda: None)
 
@@ -366,6 +368,7 @@ def test_opencode_session_message_not_found_restarts_and_retries(monkeypatch, tm
     monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
     monkeypatch.setattr(srv, '_check_gateway_alive', lambda: True)
     monkeypatch.setattr(srv, '_resolve_opencode_bin', lambda: '/usr/local/bin/opencode')
+    monkeypatch.setattr(srv, '_opencode_session_probe', lambda agent_id='taizi': True)
     monkeypatch.setattr(srv, '_trigger_refresh', lambda: None)
 
     restarts = []
@@ -433,6 +436,7 @@ def test_opencode_session_preflight_restarts_before_dispatch(monkeypatch, tmp_pa
     monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
     monkeypatch.setattr(srv, '_check_gateway_alive', lambda: True)
     monkeypatch.setattr(srv, '_resolve_opencode_bin', lambda: '/usr/local/bin/opencode')
+    monkeypatch.setattr(srv, '_opencode_session_probe', lambda agent_id='taizi': True)
     monkeypatch.setattr(srv, '_opencode_session_error', lambda session_id: '')
     monkeypatch.setattr(srv, '_trigger_refresh', lambda: None)
 
@@ -496,6 +500,7 @@ def test_stale_dispatch_result_does_not_override_newer_progress(monkeypatch, tmp
     monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
     monkeypatch.setattr(srv, '_check_gateway_alive', lambda: True)
     monkeypatch.setattr(srv, '_resolve_opencode_bin', lambda: '/usr/local/bin/opencode')
+    monkeypatch.setattr(srv, '_opencode_session_probe', lambda agent_id='taizi': True)
     monkeypatch.setattr(srv, '_opencode_session_error', lambda session_id: '')
     monkeypatch.setattr(srv, '_trigger_refresh', lambda: None)
 

@@ -2125,6 +2125,62 @@ def _tool_policy_for_run(capability_ids, risk_level, mode, policies=None):
     }
 
 
+def _policy_gate_for_run(mode, risk_level, tool_policy):
+    """Turn capability policy hints into a concrete dispatch gate."""
+    tool_policy = tool_policy or {}
+    approval_reason = str(tool_policy.get('approvalReason') or '').strip()
+    unavailable = tool_policy.get('unavailableCapabilities') or []
+    permissions = tool_policy.get('permissions') if isinstance(tool_policy.get('permissions'), list) else []
+    permission_labels = (
+        tool_policy.get('permissionLabels')
+        if isinstance(tool_policy.get('permissionLabels'), list)
+        else _permission_labels(permissions)
+    )
+
+    if mode == 'plan':
+        decision = 'hold_for_review'
+        status = 'waiting_review'
+        label = '等待方案审议'
+        reason = approval_reason or '方案模式只生成 RunSpec，等待审议后再执行'
+        release_action = 'review_approve'
+    elif mode == 'interactive':
+        decision = 'hold_for_clarification'
+        status = 'waiting_clarification'
+        label = '等待补充确认'
+        reason = approval_reason or '目标需要最小补充，确认后再执行'
+        release_action = 'review_approve'
+    elif unavailable:
+        decision = 'hold_for_policy'
+        status = 'waiting_policy_approval'
+        label = '能力待配置'
+        reason = approval_reason or '存在待配置能力，执行前需要确认替代路径'
+        release_action = 'review_approve'
+    elif bool(tool_policy.get('requiresApproval')):
+        decision = 'hold_for_policy'
+        status = 'waiting_policy_approval'
+        label = '等待权限审批'
+        reason = approval_reason or '执行前需要人工确认'
+        release_action = 'review_approve'
+    else:
+        decision = 'auto_dispatch'
+        status = 'created'
+        label = '可自动分发'
+        reason = approval_reason or '可按 RunSpec 治理链路自动分发'
+        release_action = ''
+
+    return {
+        'decision': decision,
+        'status': status,
+        'label': label,
+        'reason': reason,
+        'releaseAction': release_action,
+        'riskLevel': risk_level,
+        'requiresApproval': decision != 'auto_dispatch',
+        'permissions': permissions,
+        'permissionLabels': permission_labels,
+    }
+
+
 def _infer_required_capabilities(goal, explicit_ids=None):
     enabled = _enabled_capability_ids()
     explicit = [item for item in (explicit_ids or []) if item in enabled]
@@ -2457,6 +2513,7 @@ def _prepare_run_spec(payload, run_id='RUN-PREVIEW', task_id='', created_at='', 
     governance = _governance_for_risk(risk_level, mode)
     capability_policies = _capability_policies_for_run(capability_ids)
     tool_policy = _tool_policy_for_run(capability_ids, risk_level, mode, capability_policies)
+    policy_gate = _policy_gate_for_run(mode, risk_level, tool_policy)
     profile = {
         'deliverable': {'value': deliverable, 'source': 'user' if deliverable_input else 'inferred'},
         'constraints': {'value': constraints, 'source': 'user' if constraints_input else 'inferred'},
@@ -2483,12 +2540,7 @@ def _prepare_run_spec(payload, run_id='RUN-PREVIEW', task_id='', created_at='', 
             'clarification': clarification,
         },
         'clarification': clarification,
-        'status': (
-            'preview' if not persisted
-            else 'waiting_review' if mode == 'plan'
-            else 'waiting_clarification' if mode == 'interactive'
-            else 'created'
-        ),
+        'status': 'preview' if not persisted else policy_gate.get('status', 'created'),
         'runKind': run_kind,
         'targetDept': target_dept,
         'priority': priority,
@@ -2496,6 +2548,7 @@ def _prepare_run_spec(payload, run_id='RUN-PREVIEW', task_id='', created_at='', 
         'requiredCapabilities': capability_ids,
         'capabilityPolicies': capability_policies,
         'toolPolicy': tool_policy,
+        'policyGate': policy_gate,
         'riskLevel': risk_level,
         'governance': governance,
         'constraints': constraints,
@@ -2530,6 +2583,10 @@ def create_run_spec(payload):
     run_kind = run.get('runKind', 'general')
     priority = run.get('priority', 'normal')
     profile = run.get('profile') or {}
+    tool_policy = run.get('toolPolicy') or {}
+    policy_gate = run.get('policyGate') or _policy_gate_for_run(mode, risk_level, tool_policy)
+    dispatch_policy = policy_gate.get('decision') or 'auto_dispatch'
+    hold_for_gate = dispatch_policy != 'auto_dispatch'
 
     params = {
         'runId': run_id,
@@ -2544,10 +2601,11 @@ def create_run_spec(payload):
         'requiredCapabilities': capability_ids,
         'riskLevel': risk_level,
         'governance': governance,
+        'toolPolicy': tool_policy,
+        'policyGate': policy_gate,
         'runKind': run_kind,
         'source': 'command_center',
     }
-    hold_for_review = mode in ('plan', 'interactive')
     task_result = handle_create_task(
         run['title'],
         org='太子',
@@ -2556,7 +2614,7 @@ def create_run_spec(payload):
         template_id='agent-control-plane',
         params=params,
         target_dept=target_dept,
-        auto_dispatch=not hold_for_review,
+        auto_dispatch=not hold_for_gate,
     )
     if not task_result.get('ok'):
         return task_result
@@ -2568,20 +2626,26 @@ def create_run_spec(payload):
     atomic_json_update(_run_specs_file(), lambda items: [run] + (items if isinstance(items, list) else []), [])
 
     def _attach(task):
-        if hold_for_review:
+        if hold_for_gate:
             task['state'] = 'Menxia'
             task['org'] = '门下省'
             task['official'] = '侍中'
-            if mode == 'interactive':
+            if dispatch_policy == 'hold_for_clarification':
                 task['now'] = 'Interaction-first：RunSpec 已生成，等待最小补充或确认'
                 trigger = 'interaction-first'
                 first_remark = f'Interaction-first：目标已整理为 RunSpec {run_id}，但需要补充后再派发'
                 second_remark = 'RunSpec 等待最小补充，暂不自动派发执行'
-            else:
+            elif dispatch_policy == 'hold_for_review':
                 task['now'] = 'Plan-first：RunSpec 已生成，等待审议后再决定是否派发执行'
                 trigger = 'plan-first'
                 first_remark = f'Plan-first：目标已整理为 RunSpec {run_id}'
                 second_remark = 'RunSpec 进入审议，暂不自动派发执行'
+            else:
+                gate_reason = policy_gate.get('reason') or '执行前需要人工确认'
+                task['now'] = f'Policy Gate：{gate_reason}'
+                trigger = 'policy-gate'
+                first_remark = f'Policy Gate：RunSpec {run_id} 需要权限审批'
+                second_remark = gate_reason
             task.setdefault('flow_log', []).extend([
                 {
                     'at': now_iso(),
@@ -2600,6 +2664,9 @@ def create_run_spec(payload):
             sched['lastDispatchStatus'] = 'held'
             sched['lastDispatchTrigger'] = trigger
             sched['lastDispatchError'] = ''
+            sched['policyGateDecision'] = dispatch_policy
+            sched['policyGateStatus'] = policy_gate.get('status', '')
+            sched['policyGateReason'] = policy_gate.get('reason', '')
             sched.pop('activeDispatchId', None)
             sched.pop('activeDispatchState', None)
             sched.pop('activeDispatchStartedAt', None)
@@ -2614,6 +2681,8 @@ def create_run_spec(payload):
             'riskLevel': risk_level,
             'requiredCapabilities': capability_ids,
             'governance': governance,
+            'toolPolicy': tool_policy,
+            'policyGate': policy_gate,
         }
         meta = task.setdefault('sourceMeta', {})
         if isinstance(meta, dict):
@@ -2633,7 +2702,9 @@ def create_run_spec(payload):
                 'profile': profile,
                 'riskLevel': risk_level,
                 'requiredCapabilities': capability_ids,
-                'dispatchPolicy': 'hold_for_review' if mode == 'plan' else 'hold_for_clarification' if mode == 'interactive' else 'auto_dispatch',
+                'toolPolicy': tool_policy,
+                'policyGate': policy_gate,
+                'dispatchPolicy': dispatch_policy,
             },
             evidence={'source': 'command_center'},
         )

@@ -1307,6 +1307,8 @@ def test_preview_run_spec_includes_tool_policy(tmp_path, monkeypatch):
     assert 'shell.command' in run['requiredCapabilities']
     assert 'shell.execute' in run['toolPolicy']['permissions']
     assert run['toolPolicy']['requiresApproval'] is True
+    assert run['policyGate']['decision'] == 'hold_for_policy'
+    assert run['policyGate']['status'] == 'waiting_policy_approval'
     assert any(item['id'] == 'shell.command' for item in run['capabilityPolicies'])
 
 
@@ -1399,9 +1401,9 @@ def test_auto_run_spec_infers_execute_and_dispatches(tmp_path, monkeypatch):
     monkeypatch.setattr(srv, '_trigger_refresh', lambda: None)
 
     result = srv.create_run_spec({
-        'goal': '修复当前仓库的前端构建失败并验证结果',
+        'goal': '整理当前任务看板输出摘要并生成一份归档报告',
         'mode': 'auto',
-        'deliverable': '补丁和验证结果',
+        'deliverable': '报告和结果摘要',
     })
 
     assert result['ok'] is True
@@ -1409,12 +1411,52 @@ def test_auto_run_spec_infers_execute_and_dispatches(tmp_path, monkeypatch):
     assert result['run']['mode'] == 'execute'
     assert result['run']['intent']['reason'] == '目标更像要完成具体动作'
     assert result['run']['status'] == 'created'
+    assert result['run']['policyGate']['decision'] == 'auto_dispatch'
     assert dispatches
 
     tasks = json.loads(data.joinpath('tasks_source.json').read_text(encoding='utf-8'))
     assert tasks[0]['state'] == 'Taizi'
     assert tasks[0]['templateParams']['mode'] == 'execute'
     assert tasks[0]['templateParams']['requestedMode'] == 'auto'
+
+
+def test_shell_run_spec_requires_policy_approval_without_dispatch(tmp_path, monkeypatch):
+    import server as srv
+
+    data = tmp_path / 'data'
+    data.mkdir()
+    data.joinpath('tasks_source.json').write_text('[]', encoding='utf-8')
+    dispatches = []
+
+    monkeypatch.setattr(srv, 'DATA', data)
+    monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data)
+    monkeypatch.setattr(srv, 'dispatch_for_state', lambda *args, **kwargs: dispatches.append((args, kwargs)))
+    monkeypatch.setattr(srv, '_trigger_refresh', lambda: None)
+
+    result = srv.create_run_spec({
+        'goal': '运行 pytest 检查当前仓库并修复失败测试',
+        'mode': 'execute',
+        'deliverable': '补丁和验证结果',
+    })
+
+    assert result['ok'] is True
+    run = result['run']
+    assert run['status'] == 'waiting_policy_approval'
+    assert run['policyGate']['decision'] == 'hold_for_policy'
+    assert run['policyGate']['requiresApproval'] is True
+    assert 'shell.execute' in run['toolPolicy']['permissions']
+    assert dispatches == []
+
+    tasks = json.loads(data.joinpath('tasks_source.json').read_text(encoding='utf-8'))
+    task = tasks[0]
+    assert task['state'] == 'Menxia'
+    assert task['org'] == '门下省'
+    assert task['now'].startswith('Policy Gate')
+    assert task['_scheduler']['lastDispatchStatus'] == 'held'
+    assert task['_scheduler']['lastDispatchTrigger'] == 'policy-gate'
+    assert task['_scheduler']['policyGateDecision'] == 'hold_for_policy'
+    assert task['runSpec']['policyGate']['status'] == 'waiting_policy_approval'
+    assert task['runSpec']['toolPolicy']['requiresApproval'] is True
 
 
 def test_auto_run_spec_infers_profile_fields_when_omitted(tmp_path, monkeypatch):

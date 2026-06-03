@@ -201,6 +201,18 @@ export interface ToolPolicy {
   unknownCapabilities?: { id?: string; name?: string; reason?: string }[];
 }
 
+export interface PolicyGate {
+  decision: 'auto_dispatch' | 'hold_for_review' | 'hold_for_clarification' | 'hold_for_policy' | string;
+  status: string;
+  label: string;
+  reason?: string;
+  releaseAction?: string;
+  riskLevel?: 'low' | 'medium' | 'high' | string;
+  requiresApproval?: boolean;
+  permissions?: string[];
+  permissionLabels?: string[];
+}
+
 export interface CapabilitiesResult {
   ok: boolean;
   generatedAt: string;
@@ -236,6 +248,7 @@ export interface RunSpec {
   requiredCapabilities: string[];
   capabilityPolicies?: CapabilityPolicy[];
   toolPolicy?: ToolPolicy;
+  policyGate?: PolicyGate;
   riskLevel: 'low' | 'medium' | 'high' | string;
   governance: GovernanceStage[];
   constraints?: string;
