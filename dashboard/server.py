@@ -5860,6 +5860,13 @@ def _runtime_outbox_summary(*, counts, worker, oldest_pending_age, oldest_runnin
             'detail': f'最旧 running 已执行 {_duration_text(oldest_running_age)}。',
             'nextAction': '检查对应 Agent session；必要时等待 stale 回收或重试。',
         }
+    if worker_active and heartbeat_age is not None and heartbeat_age >= 600:
+        return {
+            'tone': 'warn',
+            'label': 'Worker 心跳旧',
+            'detail': f'worker 标记为运行中，但心跳已停留 {_duration_text(heartbeat_age)}。',
+            'nextAction': '刷新看板触发恢复；若仍旧不动，重启 dashboard worker。',
+        }
     if worker_active:
         hb = f'，心跳 {_duration_text(heartbeat_age)}前' if heartbeat_age is not None else ''
         return {
@@ -5939,11 +5946,11 @@ def get_runtime_outbox_health(limit=8):
     running_items = [x for x in items if x.get('status') == 'running']
     unfinished = pending_items + running_items
     failed = [x for x in items if x.get('status') == 'failed']
-    oldest_pending = min(
+    oldest_pending = max(
         (_outbox_item_age(x, now_dt) for x in pending_items),
         default=0,
     )
-    oldest_running = min(
+    oldest_running = max(
         (_iso_age(x.get('claimedAt'), now_dt) or _outbox_item_age(x, now_dt) for x in running_items),
         default=0,
     )

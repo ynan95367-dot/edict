@@ -12,9 +12,9 @@ import {
   Gauge,
   Pause,
   Play,
-  RotateCcw,
   Route,
 } from 'lucide-react';
+import { WorkerHealthPanel } from './edict-board/WorkerHealthPanel';
 
 // 排序权重
 const STATE_ORDER: Record<string, number> = {
@@ -285,55 +285,16 @@ export default function EdictBoard() {
     }
   };
 
-  const deadWindow = runtimeOutbox?.deadLetterWindow;
-  const deadReturned = deadWindow?.returned || runtimeOutbox?.deadLetters?.length || 0;
-  const deadTotal = deadWindow?.total || runtimeOutbox?.failed || 0;
-
   return (
     <div>
-      {!!runtimeOutbox?.failed && (
-        <div className="deadletter-panel">
-          <div className="dl-head">
-            <div>
-              <div className="dl-title">派发死信</div>
-              <div className="dl-sub">
-                {runtimeOutbox.failed} 个 outbox 项失败，最常见原因是运行时未启动、CLI 缺失或 Agent 会话报错。
-                {deadWindow?.truncated && ` 当前显示 ${deadReturned}/${deadTotal} 条。`}
-              </div>
-            </div>
-            <div className="dl-head-actions">
-              <button className="dl-scan" type="button" onClick={handleScan}>
-                <Compass size={13} />巡检
-              </button>
-              <button className="dl-archive-all" type="button" onClick={handleOutboxArchiveAll}>
-                <FolderArchive size={13} />归档全部
-              </button>
-            </div>
-          </div>
-          <div className="dl-list">
-            {runtimeOutbox.deadLetters.map((item) => (
-              <div className="dl-item" key={item.id}>
-                <button className="dl-main" type="button" onClick={() => item.taskId && setModalTaskId(item.taskId)}>
-                  <span className="dl-id">{item.taskId || item.id}</span>
-                  <span className="dl-name">{item.taskTitle || item.trigger || item.kind}</span>
-                  <span className="dl-meta">
-                    {item.kind} · {item.agentId || '未指定'} · {item.attempts || 0}/{item.maxAttempts || 0}
-                  </span>
-                </button>
-                <span className="dl-error">{item.lastError || '无错误详情'}</span>
-                <div className="dl-actions">
-                  <button className="dl-retry" type="button" onClick={() => handleOutboxRetry(item.id)}>
-                    <RotateCcw size={13} />重试
-                  </button>
-                  <button className="dl-archive" type="button" onClick={() => handleOutboxArchive(item.id)}>
-                    <Archive size={13} />归档
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      <WorkerHealthPanel
+        data={runtimeOutbox}
+        onScan={handleScan}
+        onOpenTask={setModalTaskId}
+        onRetry={handleOutboxRetry}
+        onArchive={handleOutboxArchive}
+        onArchiveAll={handleOutboxArchiveAll}
+      />
 
       <div className="board-summary">
         {summaryCards.map((card) => {

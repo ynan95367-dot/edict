@@ -295,6 +295,61 @@ def test_runtime_outbox_health_warns_about_stale_pending(tmp_path, monkeypatch):
     assert health['trend']['enqueued'] == 0
 
 
+def test_runtime_outbox_health_uses_oldest_queue_item(tmp_path, monkeypatch):
+    import datetime as dt
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    data_dir.joinpath('tasks_source.json').write_text('[]', encoding='utf-8')
+    now = dt.datetime.now(dt.timezone.utc)
+    young = (now - dt.timedelta(seconds=60)).isoformat(timespec='seconds').replace('+00:00', 'Z')
+    old = (now - dt.timedelta(seconds=1200)).isoformat(timespec='seconds').replace('+00:00', 'Z')
+    outbox_path = data_dir / 'runtime_outbox.json'
+    outbox_path.write_text(json.dumps([
+        {'id': 'pending_young', 'kind': 'dispatch', 'status': 'pending', 'createdAt': young, 'updatedAt': young},
+        {'id': 'pending_old', 'kind': 'dispatch', 'status': 'pending', 'createdAt': old, 'updatedAt': old},
+        {'id': 'running_young', 'kind': 'dispatch', 'status': 'running', 'createdAt': young, 'claimedAt': young},
+        {'id': 'running_old', 'kind': 'dispatch', 'status': 'running', 'createdAt': old, 'claimedAt': old},
+    ], ensure_ascii=False), encoding='utf-8')
+
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
+    monkeypatch.setattr(srv._runtime_outbox, 'OUTBOX_FILE', outbox_path)
+    monkeypatch.setattr(srv, '_DISPATCH_WORKER_ACTIVE', True)
+    monkeypatch.setattr(srv, '_DISPATCH_WORKER_HEARTBEAT_AT', now.isoformat(timespec='seconds').replace('+00:00', 'Z'))
+
+    health = srv.get_runtime_outbox_health()
+
+    assert health['oldestPendingAgeSec'] >= 1199
+    assert health['oldestRunningAgeSec'] >= 1199
+    assert health['summary']['label'] == 'Pending 堆积'
+
+
+def test_runtime_outbox_health_warns_about_stale_worker_heartbeat(tmp_path, monkeypatch):
+    import datetime as dt
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    data_dir.joinpath('tasks_source.json').write_text('[]', encoding='utf-8')
+    outbox_path = data_dir / 'runtime_outbox.json'
+    outbox_path.write_text('[]', encoding='utf-8')
+    old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=900)).isoformat(timespec='seconds').replace('+00:00', 'Z')
+
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
+    monkeypatch.setattr(srv._runtime_outbox, 'OUTBOX_FILE', outbox_path)
+    monkeypatch.setattr(srv, '_DISPATCH_WORKER_ACTIVE', True)
+    monkeypatch.setattr(srv, '_DISPATCH_WORKER_HEARTBEAT_AT', old)
+
+    health = srv.get_runtime_outbox_health()
+
+    assert health['summary']['tone'] == 'warn'
+    assert health['summary']['label'] == 'Worker 心跳旧'
+    assert health['worker']['heartbeatAgeSec'] >= 899
+
+
 def test_runtime_outbox_public_item_sanitizes_json_event_error():
     import server as srv
 
