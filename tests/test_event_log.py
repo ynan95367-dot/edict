@@ -62,9 +62,34 @@ def test_event_log_maps_governance_events_to_flow(monkeypatch, tmp_path):
         },
         at='2026-06-03T01:01:00Z',
     )
+    approved_event = event_log.append_event(
+        'patch_review_approved',
+        task_id='T-GOV',
+        trace_id='trc_gov',
+        payload={
+            'paths': ['dashboard/server.py'],
+            'action': 'approve',
+            'status': 'approved',
+        },
+        at='2026-06-03T01:02:00Z',
+    )
+    intent_event = event_log.append_event(
+        'intent_profile_resolved',
+        task_id='T-GOV',
+        trace_id='trc_gov',
+        payload={
+            'category': '模型配置',
+            'action': '排障修复',
+            'confidence': 91,
+            'targetDept': '兵部',
+        },
+        at='2026-06-03T01:03:00Z',
+    )
 
     run_activity = event_log.event_to_activity_entries(run_event)[0]
     patch_activity = event_log.event_to_activity_entries(patch_event)[0]
+    approved_activity = event_log.event_to_activity_entries(approved_event)[0]
+    intent_activity = event_log.event_to_activity_entries(intent_event)[0]
     assert run_activity['kind'] == 'flow'
     assert run_activity['from'] == '命令中心'
     assert 'RunSpec 已生成' in run_activity['remark']
@@ -73,6 +98,12 @@ def test_event_log_maps_governance_events_to_flow(monkeypatch, tmp_path):
     assert patch_activity['from'] == 'Patch 审批'
     assert '生成 Patch 审批' in patch_activity['remark']
     assert 'edict/T-GOV' in patch_activity['remark']
+    assert approved_activity['kind'] == 'flow'
+    assert '准奏' in approved_activity['remark']
+    assert intent_activity['kind'] == 'flow'
+    assert intent_activity['from'] == '命令中心'
+    assert intent_activity['to'] == '兵部'
+    assert '意图识别已完成' in intent_activity['remark']
 
 
 def test_agent_comm_message_lifecycle(monkeypatch, tmp_path):

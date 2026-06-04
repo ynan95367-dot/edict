@@ -809,6 +809,7 @@ def test_runtime_error_summary_hides_json_event_stream():
 def test_patch_review_create_and_approve(tmp_path, monkeypatch):
     if not shutil.which('git'):
         pytest.skip('git not available')
+    import event_log
     import server as srv
 
     root = tmp_path / 'repo'
@@ -845,6 +846,13 @@ def test_patch_review_create_and_approve(tmp_path, monkeypatch):
     assert approved['review']['status'] == 'approved'
     stored = json.loads((data / 'patch_reviews.json').read_text(encoding='utf-8'))[0]
     assert stored['decisionReason'] == 'looks good'
+    events = event_log.list_events(task_id='JJC-PATCH-1')
+    kinds = [event['kind'] for event in events]
+    assert kinds == ['patch_review_created', 'patch_review_approved']
+    assert {event['traceId'] for event in events} == {'trc_patch'}
+    assert events[0]['payload']['stats']['insertions'] == 1
+    assert events[0]['payload']['fileCount'] == 1
+    assert events[1]['payload']['reason'] == 'looks good'
 
 
 def test_patch_review_reject_reverts_worktree(tmp_path, monkeypatch):
@@ -1542,6 +1550,7 @@ def test_allocate_task_worktree_creates_dedicated_git_worktree(tmp_path, monkeyp
 
 
 def test_create_run_spec_creates_task_and_persists_mapping(tmp_path, monkeypatch):
+    import event_log
     import server as srv
 
     data = tmp_path / 'data'
@@ -1580,6 +1589,19 @@ def test_create_run_spec_creates_task_and_persists_mapping(tmp_path, monkeypatch
     assert specs[0]['taskId'] == result['taskId']
     assert specs[0]['deliverable'] == '补丁和验证结果'
     assert specs[0]['executionIsolation']['mode'] == 'patch_first_shared_worktree'
+
+    events = event_log.list_events(task_id=result['taskId'])
+    event_kinds = [event['kind'] for event in events]
+    assert event_kinds[:4] == [
+        'task_created',
+        'user_instruction_received',
+        'intent_profile_resolved',
+        'run.spec.created',
+    ]
+    assert {event['traceId'] for event in events} == {tasks[0]['traceId']}
+    assert events[1]['payload']['goal'].startswith('检查当前仓库')
+    assert events[2]['payload']['targetDept'] == '兵部'
+    assert events[3]['payload']['runId'] == result['run']['id']
 
 
 def test_auto_run_spec_infers_plan_and_holds_for_review_without_dispatch(tmp_path, monkeypatch):

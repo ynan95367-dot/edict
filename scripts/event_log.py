@@ -194,15 +194,17 @@ def event_to_activity_entries(event: dict[str, Any]) -> list[dict[str, Any]]:
             'remark': f'RunSpec 已生成{f"：{detail}" if detail else ""}',
         }]
 
-    if kind in {'patch_review_created', 'patch_review_decided'}:
+    if kind in {'patch_review_created', 'patch_review_decided', 'patch_review_approved', 'patch_review_rejected', 'patch_review_failed'}:
         action = payload.get('action') or ''
         status = payload.get('status') or ''
         paths = payload.get('paths') if isinstance(payload.get('paths'), list) else []
         branch = payload.get('worktreeBranch') or ''
         if kind == 'patch_review_created':
             remark = payload.get('remark') or f'生成 Patch 审批：{len(paths)} 个文件'
+        elif kind == 'patch_review_failed':
+            remark = payload.get('remark') or f'Patch 审批失败：{payload.get("error", "")}'.rstrip('：')
         else:
-            decision = '已准奏' if action == 'approve' or status == 'approved' else '已驳回'
+            decision = '已准奏' if kind == 'patch_review_approved' or action == 'approve' or status == 'approved' else '已驳回'
             remark = payload.get('remark') or f'Patch {decision}'
         if branch:
             remark = f'{remark} · {branch}'
@@ -212,6 +214,42 @@ def event_to_activity_entries(event: dict[str, Any]) -> list[dict[str, Any]]:
             'from': 'Patch 审批',
             'to': payload.get('to') or event.get('agentId') or 'dashboard',
             'remark': remark,
+        }]
+
+    if kind == 'user_instruction_received':
+        goal = payload.get('goal') or payload.get('title') or ''
+        return [{
+            **base,
+            'kind': 'flow',
+            'from': payload.get('from') or '用户',
+            'to': payload.get('to') or '命令中心',
+            'remark': payload.get('remark') or f'收到指令：{goal[:80]}',
+        }]
+
+    if kind == 'intent_profile_resolved':
+        category = payload.get('category') or ''
+        action = payload.get('action') or ''
+        confidence = payload.get('confidence')
+        target = payload.get('targetDept') or payload.get('to') or ''
+        detail = ' · '.join(str(item) for item in (category, action, f'置信度 {confidence}' if confidence is not None else '') if item)
+        return [{
+            **base,
+            'kind': 'flow',
+            'from': '命令中心',
+            'to': target or 'RunSpec',
+            'remark': payload.get('remark') or f'意图识别已完成{f"：{detail}" if detail else ""}',
+        }]
+
+    if kind == 'governance_review_decided':
+        action = payload.get('action') or ''
+        status = payload.get('status') or ''
+        label = '准奏' if action == 'approve' or status in {'approved', 'Done', 'Assigned'} else '封驳'
+        return [{
+            **base,
+            'kind': 'flow',
+            'from': payload.get('from') or '门下省',
+            'to': payload.get('to') or '',
+            'remark': payload.get('remark') or f'审议{label}',
         }]
 
     if kind in {'outbox_requeued', 'outbox_archived'}:

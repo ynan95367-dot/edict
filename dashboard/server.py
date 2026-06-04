@@ -160,6 +160,29 @@ def _ensure_trace_id(task):
     return trace_id
 
 
+def _resolve_task_trace_id(task_id, fallback=''):
+    """Return a stable trace id for a task, backfilling old JSON tasks if needed."""
+    if fallback:
+        return fallback
+    if not task_id:
+        return ''
+    try:
+        tasks = load_tasks()
+    except Exception:
+        return fallback or task_id
+    task = next((t for t in tasks if isinstance(t, dict) and t.get('id') == task_id), None)
+    if not task:
+        return fallback or task_id
+    had_trace = bool(task.get('traceId') or task.get('trace_id'))
+    trace_id = _ensure_trace_id(task)
+    if trace_id and not had_trace:
+        try:
+            save_tasks(tasks)
+        except Exception:
+            pass
+    return trace_id or fallback or task_id
+
+
 def _scheduler_add_runtime_session(sched, *, session_id, trace_id, agent_id, runtime, dispatch_id, trigger, state, bound_at):
     """Keep a bounded runtime-session binding history on the task scheduler."""
     if not session_id:
@@ -779,6 +802,37 @@ def _patch_review_public(item):
     }
 
 
+def _patch_review_event_payload(review, *, action='', status='', reason='', error='', remark=''):
+    review = review if isinstance(review, dict) else {}
+    paths = review.get('paths') if isinstance(review.get('paths'), list) else []
+    stats = review.get('stats') if isinstance(review.get('stats'), dict) else {}
+    payload = {
+        'patchId': review.get('id', ''),
+        'title': review.get('title', ''),
+        'taskId': review.get('taskId', ''),
+        'traceId': review.get('traceId', ''),
+        'status': status or review.get('status', ''),
+        'action': action,
+        'paths': paths,
+        'stats': stats,
+        'fileCount': len(paths),
+        'insertions': stats.get('insertions', 0),
+        'deletions': stats.get('deletions', 0),
+        'diffSize': len(review.get('diff') or ''),
+        'baseHead': review.get('baseHead', ''),
+        'worktreePath': review.get('worktreePath', ''),
+        'worktreeBranch': review.get('worktreeBranch', ''),
+        'projectRoot': review.get('projectRoot', ''),
+    }
+    if reason:
+        payload['reason'] = reason
+    if error:
+        payload['error'] = error
+    if remark:
+        payload['remark'] = remark
+    return payload
+
+
 def _normalize_patch_paths(paths, root=None):
     out = []
     seen = set()
@@ -1005,6 +1059,10 @@ def create_patch_review(task_id, paths=None):
     task = next((t for t in tasks if t.get('id') == task_id), None)
     if not task:
         return {'ok': False, 'error': f'任务 {task_id} 不存在'}
+    had_trace = bool(task.get('traceId') or task.get('trace_id'))
+    trace_id = _ensure_trace_id(task)
+    if trace_id and not had_trace:
+        save_tasks(tasks)
     patch_root = _task_patch_root(task)
     try:
         activity = (get_task_activity(task_id) or {}).get('activity') or []
@@ -1029,7 +1087,7 @@ def create_patch_review(task_id, paths=None):
     review = {
         'id': f'patch_{uuid.uuid4().hex[:16]}',
         'taskId': task_id,
-        'traceId': task.get('traceId') or task.get('trace_id') or '',
+        'traceId': trace_id,
         'status': 'pending',
         'title': task.get('title', '') or task_id,
         'paths': selected_paths,
@@ -1053,14 +1111,18 @@ def create_patch_review(task_id, paths=None):
         return items[-500:]
 
     atomic_json_update(_patch_reviews_file(), _append, [])
-    _append_runtime_event('patch_review_created', task_id, '', {
-        'patchId': review['id'],
-        'paths': selected_paths,
-        'status': 'pending',
-        'worktreePath': review.get('worktreePath', ''),
-        'worktreeBranch': review.get('worktreeBranch', ''),
-        'remark': f'生成 Patch 审批：{len(selected_paths)} 个文件',
-    }, trace_id=review.get('traceId', ''))
+    _append_runtime_event(
+        'patch_review_created',
+        task_id,
+        '',
+        _patch_review_event_payload(
+            review,
+            status='pending',
+            remark=f'生成 Patch 审批：{len(selected_paths)} 个文件',
+        ),
+        evidence={'stats': stats, 'diffPreview': diff[:4000]},
+        trace_id=review.get('traceId', ''),
+    )
     return {'ok': True, 'review': _patch_review_public(review)}
 
 
@@ -1073,6 +1135,7 @@ def handle_patch_review_action(patch_id, action, reason=''):
         return {'ok': False, 'error': f'patch review {patch_id} 不存在'}
     if review.get('status') != 'pending':
         return {'ok': False, 'error': f'patch review 已是 {review.get("status", "unknown")}'}
+    trace_id = review.get('traceId') or _resolve_task_trace_id(review.get('taskId', ''))
 
     if action == 'reject':
         patch_root = _patch_review_root(review)
@@ -1086,6 +1149,20 @@ def handle_patch_review_action(patch_id, action, reason=''):
                 timeout=15,
             )
         except Exception as exc:
+            _append_runtime_event(
+                'patch_review_failed',
+                review.get('taskId', ''),
+                '',
+                _patch_review_event_payload(
+                    review,
+                    action=action,
+                    status='failed',
+                    reason=reason,
+                    error=str(exc),
+                    remark=f'Patch 驳回回滚失败：{exc}',
+                ),
+                trace_id=trace_id,
+            )
             return {'ok': False, 'error': f'反向应用 patch 失败: {exc}'}
         if result.returncode != 0:
             err = (result.stderr or result.stdout or 'git apply failed').strip()[:500]
@@ -1099,6 +1176,20 @@ def handle_patch_review_action(patch_id, action, reason=''):
                 return items
 
             atomic_json_update(_patch_reviews_file(), _mark_error, [])
+            _append_runtime_event(
+                'patch_review_failed',
+                review.get('taskId', ''),
+                '',
+                _patch_review_event_payload(
+                    review,
+                    action=action,
+                    status='failed',
+                    reason=reason,
+                    error=err,
+                    remark=f'Patch 驳回回滚失败：{err[:120]}',
+                ),
+                trace_id=trace_id,
+            )
             return {'ok': False, 'error': err}
 
     ts = now_iso()
@@ -1121,16 +1212,22 @@ def handle_patch_review_action(patch_id, action, reason=''):
         return items
 
     atomic_json_update(_patch_reviews_file(), _decide, [])
-    _append_runtime_event('patch_review_decided', review.get('taskId', ''), '', {
-        'patchId': patch_id,
-        'action': action,
-        'status': public.get('status', ''),
-        'paths': review.get('paths') or [],
-        'reason': reason,
-        'worktreePath': public.get('worktreePath') or review.get('worktreePath', ''),
-        'worktreeBranch': public.get('worktreeBranch') or review.get('worktreeBranch', ''),
-        'remark': 'Patch 已准奏' if action == 'approve' else 'Patch 已驳回并尝试回滚',
-    }, trace_id=review.get('traceId', ''))
+    event_kind = 'patch_review_approved' if action == 'approve' else 'patch_review_rejected'
+    event_review = dict(review)
+    event_review.update(public)
+    _append_runtime_event(
+        event_kind,
+        review.get('taskId', ''),
+        '',
+        _patch_review_event_payload(
+            event_review,
+            action=action,
+            status=public.get('status', ''),
+            reason=reason,
+            remark='Patch 已准奏' if action == 'approve' else 'Patch 已驳回并回滚',
+        ),
+        trace_id=trace_id,
+    )
     return {'ok': True, 'message': 'Patch 已准奏' if action == 'approve' else 'Patch 已驳回并回滚', 'review': public}
 
 
@@ -1984,6 +2081,17 @@ def handle_create_task(title, org='中书省', official='中书令', priority='n
 
     tasks.insert(0, new_task)
     save_tasks(tasks)
+    _append_runtime_event('task_created', task_id, 'taizi', {
+        'title': title,
+        'newState': new_task.get('state', ''),
+        'to': initial_org,
+        'remark': f'下旨：{title}',
+        'priority': priority,
+        'templateId': template_id,
+        'targetDept': target_dept,
+        'runId': (params or {}).get('runId', '') if isinstance(params, dict) else '',
+        'source': (params or {}).get('source', 'dashboard') if isinstance(params, dict) else 'dashboard',
+    }, trace_id=new_task.get('traceId', ''))
     log.info(f'创建任务: {task_id} | {title[:40]}')
 
     if auto_dispatch:
@@ -3252,8 +3360,52 @@ def create_run_spec(payload):
             meta['runSpecId'] = run_id
             meta['commandCenter'] = True
 
+    attached_task = {}
     if task_id:
         modify_task(task_id, _attach)
+        try:
+            attached_task = next((t for t in load_tasks() if isinstance(t, dict) and t.get('id') == task_id), {}) or {}
+        except Exception:
+            attached_task = {}
+        trace_id = attached_task.get('traceId') or attached_task.get('trace_id') or _resolve_task_trace_id(task_id)
+        _append_runtime_event(
+            'user_instruction_received',
+            task_id=task_id,
+            payload={
+                'runId': run_id,
+                'goal': run.get('goal', ''),
+                'title': run.get('title', ''),
+                'requestedMode': requested_mode,
+                'requestedPriority': run.get('requestedPriority', 'auto'),
+                'from': '用户',
+                'to': '命令中心',
+                'remark': f'收到指令：{run.get("title", "")}',
+            },
+            evidence={'source': 'command_center'},
+            trace_id=trace_id,
+        )
+        intent_profile = (profile.get('intent') or {}) if isinstance(profile, dict) else {}
+        _append_runtime_event(
+            'intent_profile_resolved',
+            task_id=task_id,
+            payload={
+                'runId': run_id,
+                'mode': mode,
+                'requestedMode': requested_mode,
+                'intentReason': intent_reason,
+                'category': intent_profile.get('category', ''),
+                'action': intent_profile.get('action', ''),
+                'confidence': intent_profile.get('confidence'),
+                'targetDept': target_dept,
+                'runKind': run_kind,
+                'riskLevel': risk_level,
+                'requiredCapabilities': capability_ids,
+                'clarification': run.get('clarification') or {},
+                'summary': intent_profile.get('summary', ''),
+            },
+            evidence={'source': 'command_center', 'profile': intent_profile},
+            trace_id=trace_id,
+        )
         _append_runtime_event(
             'run.spec.created',
             task_id=task_id,
@@ -3271,6 +3423,7 @@ def create_run_spec(payload):
                 'dispatchPolicy': dispatch_policy,
             },
             evidence={'source': 'command_center'},
+            trace_id=trace_id,
         )
     return {'ok': True, 'run': run, 'taskId': task_id, 'message': task_result.get('message', '')}
 
@@ -3292,6 +3445,7 @@ def handle_review_action(task_id, action, comment=''):
         return {'ok': False, 'error': f'任务 {task_id} 当前状态为 {task.get("state")}，无法御批'}
 
     _ensure_scheduler(task)
+    trace_id = _ensure_trace_id(task)
     _scheduler_snapshot(task, f'review-before-{action}')
 
     if action == 'approve':
@@ -3334,9 +3488,39 @@ def handle_review_action(task_id, action, comment=''):
         sched['policyGateReason'] = gate.get('reason', '')
     task['updatedAt'] = now_iso()
     save_tasks(tasks)
+    new_state = task['state']
+    _append_runtime_event(
+        'governance_review_decided',
+        task_id,
+        'menxia',
+        {
+            'action': action,
+            'status': new_state,
+            'comment': comment,
+            'from': '门下省',
+            'to': to_dept,
+            'remark': remark,
+            'reviewRound': task.get('review_round') or 0,
+            'policyGate': _task_policy_gate(task),
+        },
+        trace_id=trace_id,
+    )
+    if new_state == 'Done':
+        _append_runtime_event(
+            'task_done',
+            task_id,
+            'menxia',
+            {
+                'summary': comment or '审查通过',
+                'outputPath': task.get('output', ''),
+                'remark': remark,
+                'from': '门下省',
+                'to': '皇上',
+            },
+            trace_id=trace_id,
+        )
 
     # 🚀 审批后自动派发对应 Agent
-    new_state = task['state']
     if new_state not in ('Done',):
         dispatch_for_state(task_id, task, new_state)
 
