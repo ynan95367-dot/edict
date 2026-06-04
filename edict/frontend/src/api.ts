@@ -952,8 +952,11 @@ export interface CodingSessionData {
   ok: boolean;
   error?: string;
   taskId: string;
-  sessionId: string;
+  traceId?: string;
+  sessionId?: string;
   runtime: string;
+  runtimeSession?: RuntimeSessionBinding;
+  sessionBindings?: RuntimeSessionBinding[];
   task: {
     title: string;
     state: string;
@@ -1036,6 +1039,8 @@ export interface TaskActivityData {
   totalDuration?: string;
   todosSummary?: TodosSummary;
   resourceSummary?: ResourceSummary;
+  runtimeSession?: RuntimeSessionBinding;
+  runtimeSessions?: RuntimeSessionBinding[];
   stateEvidence?: StateEvidence;
   traceSummary?: TraceSummary;
 }
@@ -1079,6 +1084,7 @@ export interface SchedulerStateData {
   outbox?: OutboxSummary;
   scheduler?: SchedulerInfo;
   runtimeSession?: RuntimeSessionBinding;
+  runtimeSessions?: RuntimeSessionBinding[];
   stalledSec?: number;
   dispatchDiagnosis?: {
     tone?: 'ok' | 'warn' | 'err' | 'idle' | string;

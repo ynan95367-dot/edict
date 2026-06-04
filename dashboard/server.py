@@ -208,6 +208,120 @@ def _runtime_session_summary(sched, trace_id=''):
         'boundAt': sched.get('lastDispatchSessionBoundAt') or latest.get('boundAt') or '',
     }
 
+
+def _runtime_session_id(value):
+    raw = str(value or '').strip()
+    if not raw:
+        return ''
+    if raw.startswith('ses_'):
+        return _safe_opencode_id(raw, 'ses_')
+    if re.match(r'^[A-Za-z0-9_.:-]{3,128}$', raw):
+        return raw
+    return ''
+
+
+def _task_runtime_session_bindings(task, trace_id='', ledger_events=None, activity=None):
+    """Collect runtime session bindings from scheduler, ledger, and observed activity."""
+    task = task if isinstance(task, dict) else {}
+    trace_id = trace_id or task.get('traceId') or task.get('trace_id') or ''
+    sched = task.get('_scheduler') if isinstance(task.get('_scheduler'), dict) else {}
+    summary = _runtime_session_summary(sched, trace_id)
+    sessions = []
+    seen = set()
+
+    def add_session(source, item=None, *, session_id='', trace='', status='bound'):
+        item = item if isinstance(item, dict) else {}
+        sid = _runtime_session_id(session_id or item.get('sessionId') or item.get('sessionID'))
+        if not sid:
+            return
+        item_trace = trace or item.get('traceId') or item.get('trace_id') or trace_id
+        item_status = status or item.get('status') or 'bound'
+        if trace_id and item_trace and item_trace != trace_id:
+            item_status = 'trace-mismatch'
+        elif item_status not in {'bound', 'observed', 'trace-mismatch', 'unbound'}:
+            item_status = 'bound'
+        key = (sid, item_trace or '', source)
+        if key in seen:
+            return
+        seen.add(key)
+        sessions.append({
+            'sessionId': sid,
+            'traceId': item_trace or trace_id,
+            'agentId': item.get('agentId') or item.get('agent') or '',
+            'runtime': item.get('runtime') or sched.get('lastDispatchRuntime') or '',
+            'dispatchId': item.get('dispatchId') or '',
+            'trigger': item.get('trigger') or '',
+            'state': item.get('state') or '',
+            'boundAt': item.get('boundAt') or item.get('at') or '',
+            'status': item_status,
+            'source': source,
+            'bound': item_status == 'bound',
+        })
+
+    for binding in sched.get('runtimeSessions') or []:
+        if isinstance(binding, dict):
+            add_session('scheduler', binding)
+    if summary.get('sessionId'):
+        add_session('scheduler-last', summary, status=summary.get('status') or 'bound')
+    for event in ledger_events or []:
+        if not isinstance(event, dict):
+            continue
+        payload = _dict(event.get('payload'))
+        result = _dict(payload.get('result'))
+        base = {
+            'sessionId': event.get('sessionId') or payload.get('sessionId') or result.get('sessionId'),
+            'traceId': event.get('traceId') or payload.get('traceId') or result.get('traceId'),
+            'agentId': event.get('agentId') or payload.get('agentId') or payload.get('to') or '',
+            'runtime': event.get('runtime') or payload.get('runtime') or '',
+            'dispatchId': event.get('dispatchId') or payload.get('dispatchId') or result.get('dispatchId') or '',
+            'trigger': payload.get('trigger') or '',
+            'state': payload.get('state') or '',
+            'boundAt': event.get('at') or '',
+        }
+        if base.get('sessionId'):
+            add_session('event-ledger', base, status='bound')
+    for entry in activity or []:
+        if not isinstance(entry, dict):
+            continue
+        meta = _dict(entry.get('meta'))
+        sid = entry.get('sessionId') or meta.get('sessionId')
+        if not sid:
+            continue
+        add_session('activity', {
+            'sessionId': sid,
+            'traceId': entry.get('traceId') or meta.get('traceId') or trace_id,
+            'agentId': entry.get('agent') or meta.get('agentId') or '',
+            'runtime': entry.get('runtime') or meta.get('runtime') or '',
+            'dispatchId': entry.get('dispatchId') or meta.get('dispatchId') or '',
+            'boundAt': entry.get('at') or '',
+        }, status='observed')
+
+    primary = None
+    for item in reversed(sessions):
+        if item.get('status') == 'bound' and (not trace_id or item.get('traceId') == trace_id):
+            primary = item
+            break
+    if primary is None and summary.get('sessionId'):
+        primary = {
+            **summary,
+            'source': 'scheduler-last',
+            'bound': summary.get('status') == 'bound',
+        }
+    if primary is None:
+        primary = sessions[-1] if sessions else summary
+    session_ids = []
+    seen_ids = set()
+    for item in sessions:
+        sid = item.get('sessionId') or ''
+        if sid and sid not in seen_ids:
+            seen_ids.add(sid)
+            session_ids.append(sid)
+    return {
+        'primary': primary or {},
+        'sessions': sessions,
+        'sessionIds': session_ids,
+    }
+
 # 静态资源 MIME 类型
 _MIME_TYPES = {
     '.html': 'text/html; charset=utf-8',
@@ -6203,6 +6317,8 @@ def get_scheduler_state(task_id):
         stalled_sec = max(0, int((now_dt - last_progress).total_seconds()))
     expected_agent = _expected_agent_for_task(task)
     outbox_summary = _outbox_task_summary(task_id)
+    ledger_events = _list_task_ledger_events(task_id, trace_id, limit=80)
+    runtime_bindings = _task_runtime_session_bindings(task, trace_id, ledger_events=ledger_events)
     return {
         'ok': True,
         'taskId': task_id,
@@ -6212,7 +6328,8 @@ def get_scheduler_state(task_id):
         'expectedAgent': expected_agent,
         'outbox': outbox_summary,
         'scheduler': sched,
-        'runtimeSession': _runtime_session_summary(sched, trace_id),
+        'runtimeSession': runtime_bindings.get('primary') or _runtime_session_summary(sched, trace_id),
+        'runtimeSessions': runtime_bindings.get('sessions') or [],
         'stalledSec': stalled_sec,
         'dispatchDiagnosis': _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent),
         'checkedAt': now_iso(),
@@ -7967,6 +8084,20 @@ def get_task_coding_session(task_id):
     activity_data = get_task_activity(task_id)
     activity = activity_data.get('activity') or []
     trace_id = activity_data.get('traceId') or task.get('traceId') or task.get('trace_id') or task_id
+    runtime_bindings = {
+        'primary': activity_data.get('runtimeSession') or {},
+        'sessions': activity_data.get('runtimeSessions') or [],
+    }
+    if not runtime_bindings['primary'] and not runtime_bindings['sessions']:
+        ledger_events = _list_task_ledger_events(task_id, trace_id, limit=200)
+        runtime_bindings = _task_runtime_session_bindings(
+            task,
+            trace_id,
+            ledger_events=ledger_events,
+            activity=activity,
+        )
+    runtime_session = runtime_bindings.get('primary') or {}
+    runtime_session_id = runtime_session.get('sessionId') or ''
     execution_isolation = _task_execution_isolation(task)
     patch_root = _task_patch_root(task)
     events = []
@@ -8143,8 +8274,11 @@ def get_task_coding_session(task_id):
     return {
         'ok': True,
         'taskId': task_id,
-        'sessionId': trace_id,
+        'traceId': trace_id,
+        'sessionId': runtime_session_id,
         'runtime': _agent_runtime(),
+        'runtimeSession': runtime_session,
+        'sessionBindings': runtime_bindings.get('sessions') or [],
         'task': {
             'title': task.get('title', ''),
             'state': task.get('state', ''),
@@ -8163,6 +8297,7 @@ def get_task_coding_session(task_id):
         'missingLayers': [item for item in (
             '等待 Agent 上报文件修改事件' if not any(e['kind'] == 'file.change' for e in events) else '',
             '等待 Agent 上报文件读写事件' if not summary['fileCount'] else '',
+            'OpenCode session 未绑定' if _agent_runtime() == 'opencode' and not runtime_session_id else '',
             '外部编辑器未配置' if not _editor_opener_available() else '',
             'worktree checkpoint 不可用' if not summary['hasWorktreeCheckpoint'] else '',
         ) if item],
@@ -8417,6 +8552,12 @@ def get_task_activity(task_id):
             log.warning(f'OpenCode session 融合失败 (task={task_id}): {e}')
 
     full_activity = activity
+    runtime_bindings = _task_runtime_session_bindings(
+        task,
+        trace_id,
+        ledger_events=ledger_events,
+        activity=full_activity,
+    )
     activity, activity_window = _compact_activity_for_ui(full_activity)
 
     # ── 阶段耗时统计 ──
@@ -8474,6 +8615,8 @@ def get_task_activity(task_id):
         'outputGroup': output_group,
         'phaseDurations': phase_durations,
         'totalDuration': total_duration,
+        'runtimeSession': runtime_bindings.get('primary') or {},
+        'runtimeSessions': runtime_bindings.get('sessions') or [],
         'stateEvidence': _build_state_evidence(task, ledger_events, full_activity),
         'traceSummary': _build_trace_summary(trace_id, ledger_events, full_activity, outbox_summary),
     }

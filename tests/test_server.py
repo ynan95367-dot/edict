@@ -573,6 +573,60 @@ def test_scheduler_state_exposes_runtime_session_binding(tmp_path, monkeypatch):
     assert binding['traceId'] == 'trc_bind_123456'
     assert binding['runtime'] == 'opencode'
     assert binding['dispatchId'] == 'dispatch_bind'
+    assert result['runtimeSessions'][0]['sessionId'] == 'ses_bind_abcdef'
+
+
+def test_scheduler_state_recovers_runtime_session_from_ledger(tmp_path, monkeypatch):
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    data_dir.joinpath('tasks_source.json').write_text(json.dumps([
+        {
+            'id': 'JJC-DIAG-LEDGER-BIND',
+            'title': '从事件账本恢复 OpenCode session',
+            'state': 'Doing',
+            'org': '户部',
+            'traceId': 'trc_ledger_bind',
+            'updatedAt': '2026-06-02T09:00:00Z',
+            '_scheduler': {
+                'enabled': True,
+                'lastDispatchStatus': 'success',
+                'lastDispatchAgent': 'hubu',
+                'lastDispatchState': 'Doing',
+                'lastDispatchTrigger': 'imperial-edict',
+            },
+        },
+    ], ensure_ascii=False), encoding='utf-8')
+
+    events = [{
+        'kind': 'dispatch_session_bound',
+        'taskId': 'JJC-DIAG-LEDGER-BIND',
+        'traceId': 'trc_ledger_bind',
+        'sessionId': 'ses_ledger_bind',
+        'agentId': 'hubu',
+        'at': '2026-06-02T09:00:05Z',
+        'payload': {
+            'sessionId': 'ses_ledger_bind',
+            'dispatchId': 'dispatch_ledger_bind',
+            'trigger': 'imperial-edict',
+            'state': 'Doing',
+        },
+    }]
+
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
+    monkeypatch.setattr(srv, '_ledger_list_events', lambda task_id='', limit=200: events if task_id == 'JJC-DIAG-LEDGER-BIND' else [])
+
+    result = srv.get_scheduler_state('JJC-DIAG-LEDGER-BIND')
+
+    assert result['ok'] is True
+    binding = result['runtimeSession']
+    assert binding['status'] == 'bound'
+    assert binding['sessionId'] == 'ses_ledger_bind'
+    assert binding['traceId'] == 'trc_ledger_bind'
+    assert binding['dispatchId'] == 'dispatch_ledger_bind'
+    assert result['runtimeSessions'][0]['source'] == 'event-ledger'
 
 
 def test_scheduler_state_warns_when_success_dispatch_stalls(tmp_path, monkeypatch):
@@ -1153,6 +1207,11 @@ def test_coding_session_merges_opencode_session_tool_events(tmp_path, monkeypatc
     session = srv.get_task_coding_session('JJC-OC-1')
 
     assert session['ok'] is True
+    assert session['traceId'] == 'trc_oc'
+    assert session['sessionId'] == session_id
+    assert session['runtimeSession']['sessionId'] == session_id
+    assert session['runtimeSession']['traceId'] == 'trc_oc'
+    assert session['runtimeSession']['status'] == 'bound'
     files = {f['path']: f for f in session['files']}
     assert files['data/tasks_source.json']['reads'] == 1
     assert files['outputs/weekly-report.md']['changes'] == 1
@@ -1298,6 +1357,9 @@ def test_coding_session_merges_opencode_sqlite_tool_events(tmp_path, monkeypatch
     session = srv.get_task_coding_session('JJC-OC-DB')
 
     assert session['ok'] is True
+    assert session['traceId'] == 'trc_oc_db'
+    assert session['sessionId'] == session_id
+    assert session['runtimeSession']['sessionId'] == session_id
     files = {f['path']: f for f in session['files']}
     assert files['data/tasks_source.json']['reads'] == 1
     assert files['outputs/weekly-report-db.md']['changes'] == 1

@@ -58,6 +58,14 @@ function lineLabel(startLine?: number, endLine?: number): string {
   return endLine && endLine !== startLine ? `L${startLine}-${endLine}` : `L${startLine}`;
 }
 
+function sessionStatusLabel(status?: string): string {
+  if (status === 'bound') return '已绑定';
+  if (status === 'trace-mismatch') return 'Trace 不一致';
+  if (status === 'observed') return '已观测';
+  if (status === 'unbound') return '未绑定';
+  return status || '未绑定';
+}
+
 function CheckpointStrip({ checkpoint }: { checkpoint?: WorktreeCheckpoint }) {
   if (!checkpoint) return null;
   if (!checkpoint.ok) {
@@ -133,6 +141,9 @@ export function CodingSessionSection({
   const filePreview = data.files.slice(0, 5);
   const outputPreview = data.outputs.slice(0, 4);
   const commandPreview = [...data.commands, ...data.tests].slice(-4).reverse();
+  const runtimeSession = data.runtimeSession || {};
+  const sessionStatus = runtimeSession.status || (data.sessionId ? 'bound' : 'unbound');
+  const sessionTone = sessionStatus === 'trace-mismatch' ? 'err' : sessionStatus === 'bound' || sessionStatus === 'observed' ? 'ok' : 'warn';
 
   return (
     <div className="cockpit">
@@ -140,11 +151,12 @@ export function CodingSessionSection({
         <div>
           <div className="cockpit-title">执行证据</div>
           <div className="cockpit-sub">
-            {data.runtime || 'runtime'} · session <span className="mono">{shortTrace(data.sessionId)}</span>
+            {data.runtime || 'runtime'} · session <span className={`mono tone-${sessionTone}`}>{data.sessionId ? shortTrace(data.sessionId) : '未绑定'}</span>
+            {data.traceId && <span> · trace <span className="mono">{shortTrace(data.traceId)}</span></span>}
           </div>
         </div>
         <div className={`cockpit-mode ${s.hasPatchReview ? 'ok' : 'warn'}`}>
-          {s.hasPatchReview ? `Patch 审批已接入${s.pendingPatchCount ? ` · 待审 ${s.pendingPatchCount}` : ''}` : '尚未接入 Patch 审批'}
+          {sessionStatusLabel(sessionStatus)} · {s.hasPatchReview ? `Patch 审批已接入${s.pendingPatchCount ? ` · 待审 ${s.pendingPatchCount}` : ''}` : '尚未接入 Patch 审批'}
         </div>
       </div>
 
