@@ -4031,6 +4031,15 @@ def _apply_agent_model_immediate(agent_id, new_model, *, reason='', source='auto
         'autoFailover': source == 'auto-failover',
     }
     _append_model_change_log(change)
+    _invalidate_model_registry_cache()
+    _append_runtime_event('model_selection_changed', '', agent_id, {
+        'from': source,
+        'to': agent_id,
+        'oldModel': old['value'],
+        'newModel': new_model,
+        'reason': reason,
+        'remark': f'模型切换：{_model_label(old["value"])} -> {_model_label(new_model)}',
+    }, confidence='high')
     return change
 
 
@@ -4182,6 +4191,37 @@ def _maybe_apply_model_failover(agent_id, model_id, status, error='', *, task_id
     )
     _record_model_failover(agent_id, model_id, fallback, reason=error, task_id=task_id, trace_id=trace_id, dispatch_id=dispatch_id)
     return fallback
+
+
+def _agent_ids_using_model(model_id):
+    model_id = str(model_id or '').strip()
+    if not model_id:
+        return []
+    out = []
+    for ag in _agent_config_agents():
+        agent_id = str(ag.get('id') or '').strip()
+        if agent_id and str(ag.get('model') or '').strip() == model_id:
+            out.append(agent_id)
+    return out
+
+
+def _maybe_apply_probe_model_failovers(model_id, status, error='', *, source='active-probe'):
+    if not _is_model_failure_candidate(status, error):
+        return []
+    changes = []
+    for agent_id in _agent_ids_using_model(model_id):
+        replacement = _maybe_apply_model_failover(
+            agent_id,
+            model_id,
+            status,
+            error,
+            task_id='',
+            trace_id='',
+            dispatch_id=f'model-probe:{source}',
+        )
+        if replacement:
+            changes.append({'agentId': agent_id, 'oldModel': model_id, 'newModel': replacement})
+    return changes
 
 
 def _latest_outbox_model_signal(agent_id, model_id=''):
@@ -4751,7 +4791,17 @@ def _record_model_probe(model_id, status, *, latency_ms=None, error='', source='
 
     updated = atomic_json_update(_model_probe_file(), _update, _empty_model_probe_state())
     _invalidate_model_registry_cache()
-    return (updated.get('records') or {}).get(model_id, {}) if isinstance(updated, dict) else {}
+    rec = (updated.get('records') or {}).get(model_id, {}) if isinstance(updated, dict) else {}
+    failovers = _maybe_apply_probe_model_failovers(
+        model_id,
+        normalized,
+        rec.get('lastError') or error,
+        source=source,
+    )
+    if failovers:
+        rec = dict(rec)
+        rec['autoFailovers'] = failovers
+    return rec
 
 
 def _terminate_model_probe_process(proc, *, kill=False):
@@ -4949,6 +4999,20 @@ def _ensure_model_probe_observer():
         return True
 
 
+def _model_probe_observer_alive():
+    return bool(_MODEL_PROBE_THREAD is not None and _MODEL_PROBE_THREAD.is_alive())
+
+
+def _resume_model_probe_observer_if_enabled(state=None):
+    state = state if isinstance(state, dict) else _read_model_probe_state()
+    config = state.get('config') if isinstance(state.get('config'), dict) else {}
+    if not config.get('enabled'):
+        return False
+    if not _model_probe_observer_alive():
+        _ensure_model_probe_observer()
+    return True
+
+
 def start_model_probes(body=None):
     body = body if isinstance(body, dict) else {}
     registry = get_model_registry(force=False)
@@ -5003,9 +5067,11 @@ def run_model_probes_now(body=None):
 
 def get_model_probes():
     state = _read_model_probe_state()
+    _resume_model_probe_observer_if_enabled(state)
     running = bool(_MODEL_PROBE_RUNNING)
     if state.get('running') and not running:
         state = _set_model_probe_run_state(running=False, queue=[], current_model='', finished=True)
+    observer_running = _model_probe_observer_alive()
     records = state.get('records') if isinstance(state.get('records'), dict) else {}
     statuses = {'ok': 0, 'timeout': 0, 'failed': 0, 'degraded': 0, 'offline': 0, 'unknown': 0}
     measured = 0
@@ -5025,6 +5091,7 @@ def get_model_probes():
         'ok': True,
         'generatedAt': now_iso(),
         'running': running,
+        'observerRunning': observer_running,
         'currentModel': state.get('currentModel') or '',
         'queue': state.get('queue') if isinstance(state.get('queue'), list) else [],
         'lastStartedAt': state.get('lastStartedAt') or '',
@@ -5263,6 +5330,7 @@ def add_custom_model_to_registry(body):
         return cfg
 
     atomic_json_update(ocfg_path, _update_opencode, {})
+    _invalidate_model_registry_cache()
     _append_runtime_event('model_registry_custom_added', payload={
         'model': full_id,
         'providerId': provider_id,
@@ -5278,6 +5346,47 @@ def add_custom_model_to_registry(body):
         'registry': get_model_registry(force=False),
         'restartRequired': True,
     }
+
+
+def set_agent_model(agent_id, model):
+    agent_id = str(agent_id or '').strip()
+    model = str(model or '').strip()
+    if not agent_id or not model:
+        return {'ok': False, 'error': 'agentId and model required'}
+
+    if _agent_runtime() == 'opencode':
+        registry = get_model_registry(force=False)
+        selectable = {item.get('id') for item in registry.get('models', []) if isinstance(item, dict)}
+        if selectable and model not in selectable:
+            return {
+                'ok': False,
+                'error': f'模型不在 OpenCode 当前可用列表中: {model}。请先点击“同步 OpenCode”。',
+            }
+        old_model = _agent_current_model(agent_id)
+        change = _apply_agent_model_immediate(
+            agent_id,
+            model,
+            old_model=old_model,
+            source='dashboard',
+            reason='manual model switch from dashboard',
+        )
+        return {
+            'ok': True,
+            'message': f'{agent_id} 已切换为 {model}',
+            'change': change,
+            'agentConfig': get_agent_config_response(force=False),
+            'registry': get_model_registry(force=False),
+        }
+
+    pending_path = DATA / 'pending_model_changes.json'
+
+    def update_pending(current):
+        current = [x for x in current if isinstance(x, dict) and x.get('agentId') != agent_id]
+        current.append({'agentId': agent_id, 'model': model})
+        return current
+
+    atomic_json_update(pending_path, update_pending, [])
+    return {'ok': True, 'queued': True, 'message': f'Queued: {agent_id} -> {model}'}
 
 
 def _resolve_opencode_bin():
@@ -10830,55 +10939,22 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/api/set-model':
             agent_id = body.get('agentId', '').strip()
             model = body.get('model', '').strip()
-            if not agent_id or not model:
-                self.send_json({'ok': False, 'error': 'agentId and model required'}, 400)
+            result = set_agent_model(agent_id, model)
+            if not result.get('ok'):
+                self.send_json(result, 400)
                 return
 
-            if _agent_runtime() == 'opencode':
-                registry = get_model_registry(force=False)
-                selectable = {item.get('id') for item in registry.get('models', []) if isinstance(item, dict)}
-                if selectable and model not in selectable:
-                    self.send_json({
-                        'ok': False,
-                        'error': f'模型不在 OpenCode 当前可用列表中: {model}。请先点击“同步 OpenCode”。',
-                    }, 400)
-                    return
-                old_model = _agent_current_model(agent_id)
-                change = _apply_agent_model_immediate(
-                    agent_id,
-                    model,
-                    old_model=old_model,
-                    source='dashboard',
-                    reason='manual model switch from dashboard',
-                )
-                self.send_json({
-                    'ok': True,
-                    'message': f'{agent_id} 已切换为 {model}',
-                    'change': change,
-                    'agentConfig': get_agent_config_response(force=False),
-                    'registry': get_model_registry(force=False),
-                })
-                return
+            if result.get('queued'):
+                def apply_async():
+                    try:
+                        subprocess.run([python_bin(), str(SCRIPTS / 'apply_model_changes.py')], timeout=30)
+                        sync_script = 'sync_opencode_agents.py' if _agent_runtime() == 'opencode' else 'sync_agent_config.py'
+                        subprocess.run([python_bin(), str(SCRIPTS / sync_script)], timeout=10)
+                    except Exception as e:
+                        print(f'[apply error] {e}', file=sys.stderr)
 
-            # Write to pending (atomic)
-            pending_path = DATA / 'pending_model_changes.json'
-            def update_pending(current):
-                current = [x for x in current if x.get('agentId') != agent_id]
-                current.append({'agentId': agent_id, 'model': model})
-                return current
-            atomic_json_update(pending_path, update_pending, [])
-
-            # Async apply
-            def apply_async():
-                try:
-                    subprocess.run([python_bin(), str(SCRIPTS / 'apply_model_changes.py')], timeout=30)
-                    sync_script = 'sync_opencode_agents.py' if _agent_runtime() == 'opencode' else 'sync_agent_config.py'
-                    subprocess.run([python_bin(), str(SCRIPTS / sync_script)], timeout=10)
-                except Exception as e:
-                    print(f'[apply error] {e}', file=sys.stderr)
-
-            threading.Thread(target=apply_async, daemon=True).start()
-            self.send_json({'ok': True, 'message': f'Queued: {agent_id} → {model}'})
+                threading.Thread(target=apply_async, daemon=True).start()
+            self.send_json(result)
 
         # Fix #139: 设置派发渠道（feishu/telegram/wecom/signal/tui）
         elif p == '/api/set-dispatch-channel':
@@ -10981,6 +11057,12 @@ def main():
                 log.warning(f'定时巡检异常: {e}')
     threading.Thread(target=_periodic_scheduler_scan, daemon=True).start()
     log.info('🔍 定时巡检已启动（每120秒）')
+
+    try:
+        if _resume_model_probe_observer_if_enabled():
+            log.info('📡 模型持续观测已恢复')
+    except Exception as e:
+        log.warning(f'模型持续观测恢复失败: {e}')
 
     try:
         server.serve_forever()

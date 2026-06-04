@@ -26,7 +26,7 @@ export default function MemorialPanel() {
     }
     md += `\n## 流转记录\n\n`;
     for (const f of fl) {
-      md += `- **${f.from}** → **${f.to}**  \n  ${f.remark}  \n  _${(f.at || '').substring(0, 19)}_\n\n`;
+      md += `- **${f.from}** → **${f.to}**\n  ${f.remark}\n  _${(f.at || '').substring(0, 19)}_\n\n`;
     }
     if (t.output && t.output !== '-') md += `## 产出物\n\n\`${t.output}\`\n`;
     navigator.clipboard.writeText(md).then(

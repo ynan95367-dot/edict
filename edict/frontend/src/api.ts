@@ -88,7 +88,10 @@ export const api = {
 
   // 操作类
   setModel: (agentId: string, model: string) =>
-    postJ<ActionResult>(`${API_BASE}/api/set-model`, { agentId, model }),
+    postJ<ActionResult & { change?: ChangeLogEntry; agentConfig?: AgentConfig; registry?: ModelRegistryData }>(
+      `${API_BASE}/api/set-model`,
+      { agentId, model }
+    ),
   setDispatchChannel: (channel: string) =>
     postJ<ActionResult>(`${API_BASE}/api/set-dispatch-channel`, { channel }),
   agentWake: (agentId: string) =>
@@ -570,6 +573,7 @@ export interface ModelProbeData {
   ok: boolean;
   generatedAt: string;
   running: boolean;
+  observerRunning?: boolean;
   currentModel?: string;
   queue?: string[];
   lastStartedAt?: string;

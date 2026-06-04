@@ -112,6 +112,46 @@ def test_model_failover_updates_configs_and_logs(monkeypatch, tmp_path):
     assert health['failovers'][-1]['newModel'] == fallback_model
 
 
+def test_model_probe_timeout_auto_failovers_current_agents(monkeypatch, tmp_path):
+    """Continuous model probes should switch agents away from a timed-out current model."""
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    dashboard_dir = tmp_path / 'dashboard'
+    dashboard_dir.mkdir()
+    current_model = 'github-copilot/claude-opus-4.6'
+    fallback_model = 'openai-codex/gpt-5.3-codex'
+    _write_agent_config(data_dir, current_model, fallback_model)
+    (tmp_path / 'opencode.json').write_text(
+        json.dumps({'model': current_model, 'agent': {'taizi': {'model': current_model}}}, ensure_ascii=False),
+        encoding='utf-8',
+    )
+
+    monkeypatch.setenv('EDICT_RUNTIME', 'opencode')
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, 'BASE', dashboard_dir)
+    monkeypatch.setattr(srv, '_append_runtime_event', lambda *args, **kwargs: None)
+
+    probe = srv._record_model_probe(
+        current_model,
+        'timeout',
+        latency_ms=120000,
+        error='provider request timeout after 120s',
+        source='test-probe',
+    )
+
+    cfg = json.loads((data_dir / 'agent_config.json').read_text(encoding='utf-8'))
+    ocfg = json.loads((tmp_path / 'opencode.json').read_text(encoding='utf-8'))
+    health = json.loads((data_dir / 'model_health.json').read_text(encoding='utf-8'))
+
+    assert probe['autoFailovers'] == [{'agentId': 'taizi', 'oldModel': current_model, 'newModel': fallback_model}]
+    assert cfg['agents'][0]['model'] == fallback_model
+    assert ocfg['agent']['taizi']['model'] == fallback_model
+    assert health['failovers'][-1]['oldModel'] == current_model
+    assert health['failovers'][-1]['newModel'] == fallback_model
+
+
 def test_model_registry_merges_opencode_cli_server_manual_and_latency(monkeypatch, tmp_path):
     """The registry should expose the live OpenCode CLI list, server metadata, manual models, and latency."""
     import server as srv
@@ -465,3 +505,91 @@ def test_add_custom_model_writes_dashboard_and_opencode_provider(monkeypatch, tm
     assert ocfg['provider']['openrouter']['options']['apiKey'] == 'sk-test-secret'
     assert ocfg['provider']['openrouter']['models']['anthropic/claude-3.5-sonnet']['name'] == 'Claude via OpenRouter'
     assert custom['models'][0]['apiKey'] == 'sk-test-secret'
+
+
+def test_get_model_probes_resumes_enabled_observer(monkeypatch, tmp_path):
+    """An enabled continuous observer should be restored after dashboard restart."""
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    (data_dir / 'model_probes.json').write_text(
+        json.dumps(
+            {
+                'version': 1,
+                'running': False,
+                'records': {},
+                'config': {'enabled': True, 'intervalSec': 60, 'timeoutSec': 10, 'modelIds': ['opencode/big-pickle']},
+            },
+            ensure_ascii=False,
+        ),
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_MODEL_PROBE_RUNNING', False)
+    monkeypatch.setattr(srv, '_MODEL_PROBE_THREAD', None)
+
+    resumed = []
+
+    def fake_resume():
+        resumed.append(True)
+        return True
+
+    monkeypatch.setattr(srv, '_ensure_model_probe_observer', fake_resume)
+    monkeypatch.setattr(srv, '_model_probe_observer_alive', lambda: bool(resumed))
+
+    probes = srv.get_model_probes()
+
+    assert resumed == [True]
+    assert probes['observerRunning'] is True
+    assert probes['config']['enabled'] is True
+
+
+def test_set_agent_model_opencode_writes_live_configs(monkeypatch, tmp_path):
+    """Dashboard model selection should immediately update both agent_config and opencode.json."""
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    dashboard_dir = tmp_path / 'dashboard'
+    dashboard_dir.mkdir()
+    old_model = 'opencode/deepseek-v4-flash-free'
+    new_model = 'moonshotai-cn/kimi-k2.6'
+    (data_dir / 'agent_config.json').write_text(
+        json.dumps(
+            {
+                'runtime': 'opencode',
+                'defaultModel': old_model,
+                'knownModels': [
+                    {'id': old_model, 'label': 'DeepSeek Free', 'provider': 'OpenCode Zen'},
+                    {'id': new_model, 'label': 'Kimi K2.6', 'provider': 'Moonshot AI (China)'},
+                ],
+                'agents': [{'id': 'taizi', 'label': '太子', 'role': '太子', 'emoji': '🤴', 'model': old_model}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding='utf-8',
+    )
+    (tmp_path / 'opencode.json').write_text(
+        json.dumps({'model': old_model, 'agent': {'taizi': {'model': old_model}}}, ensure_ascii=False),
+        encoding='utf-8',
+    )
+
+    monkeypatch.setenv('EDICT_RUNTIME', 'opencode')
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, 'BASE', dashboard_dir)
+    monkeypatch.setattr(srv, 'PROJECT_ROOT', tmp_path)
+    monkeypatch.setattr(srv, '_sync_opencode_agent_config', lambda force=False: False)
+    monkeypatch.setattr(srv, '_opencode_cli_model_entries', lambda force=False: ([], {'id': 'opencode-cli', 'label': 'OpenCode CLI', 'ok': True, 'count': 0, 'latencyMs': 0, 'error': ''}))
+    monkeypatch.setattr(srv, '_opencode_provider_model_entries', lambda: ([], {'id': 'opencode-server', 'label': 'OpenCode Server', 'ok': True, 'count': 0, 'latencyMs': 0, 'error': ''}))
+    monkeypatch.setattr(srv, '_append_runtime_event', lambda *args, **kwargs: None)
+
+    result = srv.set_agent_model('taizi', new_model)
+    cfg = json.loads((data_dir / 'agent_config.json').read_text(encoding='utf-8'))
+    ocfg = json.loads((tmp_path / 'opencode.json').read_text(encoding='utf-8'))
+
+    assert result['ok'] is True
+    assert result['change']['oldModel'] == old_model
+    assert result['change']['newModel'] == new_model
+    assert cfg['agents'][0]['model'] == new_model
+    assert ocfg['agent']['taizi']['model'] == new_model

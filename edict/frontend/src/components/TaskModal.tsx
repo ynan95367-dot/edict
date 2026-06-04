@@ -1,161 +1,33 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
-import {
-  ArrowUpCircle,
-  Ban,
-  CheckCircle2,
-  ExternalLink,
-  Pause,
-  Play,
-  RotateCcw,
-  Search,
-  SkipForward,
-  Undo2,
-  X,
-  XCircle,
-} from 'lucide-react';
-import { useStore, getPipeStatus, deptColor, stateLabel, STATE_LABEL } from '../store';
+import { X } from 'lucide-react';
+import { useStore, getPipeStatus, stateLabel } from '../store';
 import { api } from '../api';
-import { formatDashboardDateTime, formatDashboardTime } from '../time';
 import { CodingSessionSection } from './task-modal/CodingSessionSection';
 import { EvidenceChainSection } from './task-modal/EvidenceChainSection';
+import { GovernanceMap } from './task-modal/GovernanceMap';
+import { LiveActivitySection } from './task-modal/LiveActivitySection';
+import { SchedulerDiagnosisPanel } from './task-modal/SchedulerDiagnosisPanel';
+import { SourcePreviewPanel } from './task-modal/SourcePreviewPanel';
+import { TaskActionsBar } from './task-modal/TaskActionsBar';
+import { TaskNotesSection } from './task-modal/TaskNotesSection';
 import { TaskOutputSection } from './task-modal/TaskOutputSection';
+import { TodoSection } from './task-modal/TodoSection';
+import {
+  agentLabel,
+  dispatchInfo,
+  NEXT_LABELS,
+  runtimeSessionLabel,
+  runtimeSessionTone,
+  SCHED_ACTION_LABELS,
+  type SchedulerActionFeedback,
+} from './task-modal/taskModalUtils';
 import type {
-  Task,
   TaskActivityData,
   SchedulerStateData,
-  ActivityEntry,
-  TodoItem,
-  SchedulerInfo,
   CodingSessionData,
   TaskEvidenceData,
   SourceFileResult,
 } from '../api';
-
-const AGENT_LABELS: Record<string, string> = {
-  main: '太子',
-  zhongshu: '中书省',
-  menxia: '门下省',
-  shangshu: '尚书省',
-  libu: '礼部',
-  hubu: '户部',
-  bingbu: '兵部',
-  xingbu: '刑部',
-  gongbu: '工部',
-  libu_hr: '吏部',
-  zaochao: '钦天监',
-};
-
-const NEXT_LABELS: Record<string, string> = {
-  Taizi: '中书省起草',
-  Zhongshu: '门下省审议',
-  Menxia: '尚书省派发',
-  Assigned: '开始执行',
-  Doing: '进入审查',
-  Review: '完成',
-};
-
-const DISPATCH_LABELS: Record<string, { label: string; tone: 'ok' | 'warn' | 'err' | 'idle' }> = {
-  queued: { label: '派发排队中', tone: 'warn' },
-  progress: { label: 'Agent 已有进展', tone: 'ok' },
-  success: { label: '最近派发成功', tone: 'ok' },
-  idle: { label: '等待调度', tone: 'idle' },
-  failed: { label: '派发失败', tone: 'err' },
-  timeout: { label: '派发超时', tone: 'err' },
-  error: { label: '派发异常', tone: 'err' },
-  'gateway-offline': { label: '运行时未启动', tone: 'err' },
-  'openclaw-missing': { label: 'OpenClaw CLI 缺失', tone: 'err' },
-  'opencode-missing': { label: 'OpenCode CLI 缺失', tone: 'err' },
-  'opencode-session-stale': { label: 'OpenCode 会话失效', tone: 'warn' },
-};
-
-const SCHED_ACTION_LABELS: Record<string, string> = {
-  scan: '立即扫描',
-  retry: '重试派发',
-  escalate: '升级协调',
-  rollback: '回滚',
-};
-
-type SchedulerActionFeedback = {
-  action: string;
-  label: string;
-  detail: string;
-  tone: 'ok' | 'warn' | 'err' | 'idle';
-  pending?: boolean;
-};
-
-function dispatchInfo(sched?: SchedulerInfo | null) {
-  const raw = sched?.lastDispatchStatus || 'idle';
-  return DISPATCH_LABELS[raw] || { label: raw, tone: 'warn' as const };
-}
-
-function agentLabel(agent?: string) {
-  if (!agent) return '';
-  return AGENT_LABELS[agent] || agent;
-}
-
-function fmtStalled(sec: number): string {
-  const v = Math.max(0, sec);
-  if (v < 60) return `${v}秒`;
-  if (v < 3600) return `${Math.floor(v / 60)}分${v % 60}秒`;
-  const h = Math.floor(v / 3600);
-  const m = Math.floor((v % 3600) / 60);
-  return `${h}小时${m}分`;
-}
-
-function activityKey(a: ActivityEntry): string {
-  const at = String(a.at || '');
-  if (a.eventId) return `event:${a.eventId}`;
-  if (a.kind === 'flow') return ['flow', at, a.from || '', a.to || '', a.remark || ''].join('|');
-  if (a.kind === 'progress') return ['progress', at, a.agent || '', a.text || ''].join('|');
-  if (a.kind === 'tool_result') return ['tool', at, a.agent || '', a.tool || '', (a.output || '').slice(0, 80)].join('|');
-  return [a.kind, at, a.agent || '', a.text || a.thinking || a.eventKind || ''].join('|');
-}
-
-function compactActivity(activity: ActivityEntry[]): ActivityEntry[] {
-  const seen = new Set<string>();
-  const out: ActivityEntry[] = [];
-  for (const item of activity) {
-    if (item.kind === 'todos') continue;
-    const key = activityKey(item);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(item);
-  }
-  return out.slice(-80);
-}
-
-function fmtActivityTime(ts: number | string | undefined): string {
-  return formatDashboardTime(ts, { showSeconds: true });
-}
-
-function shortTrace(traceId?: string): string {
-  if (!traceId) return '—';
-  return traceId.length > 18 ? `${traceId.slice(0, 8)}…${traceId.slice(-6)}` : traceId;
-}
-
-function outboxLabel(outbox?: { pending?: number; running?: number; failed?: number; total?: number } | null): string {
-  if (!outbox) return '空';
-  const parts: string[] = [];
-  if (outbox.running) parts.push(`执行${outbox.running}`);
-  if (outbox.pending) parts.push(`待发${outbox.pending}`);
-  if (outbox.failed) parts.push(`失败${outbox.failed}`);
-  return parts.join(' · ') || '空';
-}
-
-function runtimeSessionTone(status?: string): 'ok' | 'warn' | 'err' | 'idle' {
-  if (status === 'bound') return 'ok';
-  if (status === 'trace-mismatch') return 'err';
-  if (status === 'unbound') return 'idle';
-  if (status) return 'warn';
-  return 'idle';
-}
-
-function runtimeSessionLabel(status?: string): string {
-  if (status === 'bound') return '已绑定';
-  if (status === 'trace-mismatch') return 'Trace 不一致';
-  if (status === 'unbound') return '未绑定';
-  return status || '未绑定';
-}
 
 export default function TaskModal() {
   const modalTaskId = useStore((s) => s.modalTaskId);
@@ -505,120 +377,39 @@ export default function TaskModal() {
             </div>
           </div>
 
-          <div className="governance-map">
-            <div className="section-headline">
-              <div>
-                <span>从下旨到回奏</span>
-                <b>治理链路</b>
-              </div>
-              <em>{completedStageCount}/{stages.length} 已完成</em>
-            </div>
-            <div className="m-pipe">
-              {stages.map((s, i) => (
-                <div className="mp-stage" key={s.key}>
-                  <div className={`mp-node ${s.status}`}>
-                    {s.status === 'done' && <div className="mp-done-tick">✓</div>}
-                    <div className="mp-icon">{s.icon}</div>
-                    <div className="mp-dept" style={s.status === 'active' ? { color: 'var(--acc)' } : s.status === 'done' ? { color: 'var(--ok)' } : {}}>
-                      {s.dept}
-                    </div>
-                    <div className="mp-action">{s.action}</div>
-                  </div>
-                  {i < stages.length - 1 && (
-                    <div className="mp-arrow" style={s.status === 'done' ? { color: 'var(--ok)', opacity: 0.6 } : {}}>→</div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
+          <GovernanceMap stages={stages} completedStageCount={completedStageCount} />
 
-          {/* Action Buttons */}
-          <div className="task-actions">
-            {canStop && (
-              <>
-                <button className="btn-action btn-stop" onClick={handleStop}><Pause size={14} />叫停任务</button>
-                <button className="btn-action btn-cancel" onClick={handleCancel}><Ban size={14} />取消任务</button>
-              </>
-            )}
-            {canResume && (
-              <button className="btn-action btn-resume" onClick={() => doTaskAction('resume', '恢复执行')}><Play size={14} />恢复执行</button>
-            )}
-            {['Review', 'Menxia'].includes(task.state) && (
-              <>
-                <button className="btn-action" style={{ background: '#2ecc8a22', color: '#2ecc8a', border: '1px solid #2ecc8a44' }} onClick={() => doReview('approve')}><CheckCircle2 size={14} />准奏</button>
-                <button className="btn-action" style={{ background: '#ff527022', color: '#ff5270', border: '1px solid #ff527044' }} onClick={() => doReview('reject')}><XCircle size={14} />封驳</button>
-              </>
-            )}
-            {['Pending', 'Taizi', 'Zhongshu', 'Menxia', 'Assigned', 'Doing', 'Review', 'Next'].includes(task.state) && (
-              <button className="btn-action" style={{ background: '#7c5cfc18', color: '#7c5cfc', border: '1px solid #7c5cfc44' }} onClick={doAdvance}><SkipForward size={14} />推进到下一步</button>
-            )}
-          </div>
+          <TaskActionsBar
+            taskState={task.state}
+            canStop={canStop}
+            canResume={canResume}
+            onStop={handleStop}
+            onCancel={handleCancel}
+            onResume={() => doTaskAction('resume', '恢复执行')}
+            onReview={doReview}
+            onAdvance={doAdvance}
+          />
 
-          {/* Runtime Summary */}
-          <div className="run-section">
-            <div className="run-head">
-              <div>
-                <span className="run-title">调度诊断</span>
-                <p>把状态、派发、队列和下一步动作合并成一个可执行判断。</p>
-              </div>
-              <span className="run-sub">{sched?.enabled === false ? '调度已禁用' : `阈值 ${sched?.stallThresholdSec || 180}s`}</span>
-            </div>
-            <div className="run-layout">
-              <div className={`run-diagnosis ${dispatchDiagnosis?.tone || 'idle'}`}>
-                <span className="run-diagnosis-kicker">系统判断</span>
-                <b>{dispatchDiagnosis?.label || '等待派发诊断'}</b>
-                <span>{dispatchDiagnosis?.detail || '调度信息读取中，尚无明确异常。'}</span>
-                <em>{dispatchDiagnosis?.nextAction || nextActionText}</em>
-                {canRunDiagnosisAction && (
-                  <button
-                    type="button"
-                    disabled={!!schedActionFeedback?.pending}
-                    onClick={() => doSchedAction(diagnosisAction || '', dispatchDiagnosis?.actionReason || dispatchDiagnosis?.detail || dispatchDiagnosis?.label || '', 'diagnosis')}
-                  >
-                    {dispatchDiagnosis?.actionLabel || '处理'}
-                  </button>
-                )}
-              </div>
-              <div className="run-grid">
-                <div className="run-cell"><span>阶段</span><b>{stageLine}</b></div>
-                <div className="run-cell"><span>派发</span><b className={`tone-${dInfo.tone}`}>{dInfo.label}</b></div>
-                <div className="run-cell"><span>未推进</span><b>{fmtStalled(stalledSec)}</b></div>
-                <div className="run-cell"><span>目标</span><b>{expectedAgent || lastDispatchAgent || task.org || '—'}</b></div>
-                <div className="run-cell"><span>Trace</span><b className="mono">{shortTrace(traceId)}</b></div>
-                <div className="run-cell"><span>Session</span><b className={`mono tone-${sessionTone}`}>{runtimeSession?.sessionId ? shortTrace(runtimeSession.sessionId) : '未绑定'}</b></div>
-                <div className="run-cell"><span>绑定</span><b className={`tone-${sessionTone}`}>{sessionLabel}</b></div>
-                <div className="run-cell"><span>队列</span><b className={outbox?.failed ? 'tone-err' : outbox?.pending || outbox?.running ? 'tone-warn' : 'tone-ok'}>{outboxLabel(outbox)}</b></div>
-              </div>
-            </div>
-            {sched && (
-              <div className="run-line">
-                {sched.lastProgressAt && <span>最近进展 {formatDashboardDateTime(sched.lastProgressAt)}</span>}
-                {sched.lastDispatchAt && <span>最近派发 {formatDashboardDateTime(sched.lastDispatchAt)}</span>}
-                {runtimeSession?.boundAt && <span>Session 绑定 {formatDashboardDateTime(runtimeSession.boundAt)}</span>}
-                {sched.lastDispatchError && <span className="run-error">派发错误：{sched.lastDispatchError}</span>}
-                <span>重试 {sched.retryCount || 0}</span>
-                <span>升级 {!sched.escalationLevel ? '无' : sched.escalationLevel === 1 ? '门下省' : '尚书省'}</span>
-              </div>
-            )}
-            {schedActionFeedback && (
-              <div className={`run-action-feedback ${schedActionFeedback.tone}${schedActionFeedback.pending ? ' pending' : ''}`} role="status">
-                <b>{schedActionFeedback.label}</b>
-                <span>{schedActionFeedback.detail}</span>
-              </div>
-            )}
-            <div className="sched-actions compact">
-              <button className="sched-btn" disabled={!!schedActionFeedback?.pending} onClick={() => doSchedAction('scan')}><Search size={13} />立即扫描</button>
-              {canMutateSchedule ? (
-                <>
-                  <button className="sched-btn" disabled={!!schedActionFeedback?.pending} onClick={() => doSchedAction('retry')}><RotateCcw size={13} />重试派发</button>
-                  <button className="sched-btn warn" disabled={!!schedActionFeedback?.pending} onClick={() => doSchedAction('escalate')}><ArrowUpCircle size={13} />升级协调</button>
-                  <button className="sched-btn danger" disabled={!!schedActionFeedback?.pending} onClick={() => doSchedAction('rollback')}><Undo2 size={13} />回滚</button>
-                </>
-              ) : (
-                <span className="sched-terminal-note">终态任务仅保留证据扫描</span>
-              )}
-            </div>
-          </div>
+          <SchedulerDiagnosisPanel
+            sched={sched}
+            stalledSec={stalledSec}
+            dispatchInfo={dInfo}
+            dispatchDiagnosis={dispatchDiagnosis}
+            runtimeSession={runtimeSession}
+            sessionTone={sessionTone}
+            sessionLabel={sessionLabel}
+            stageLine={stageLine}
+            expectedAgent={expectedAgent}
+            lastDispatchAgent={lastDispatchAgent}
+            taskOrg={task.org}
+            traceId={traceId}
+            outbox={outbox}
+            nextActionText={nextActionText}
+            canMutateSchedule={canMutateSchedule}
+            canRunDiagnosisAction={canRunDiagnosisAction}
+            schedActionFeedback={schedActionFeedback}
+            onSchedAction={doSchedAction}
+          />
 
           <EvidenceChainSection data={evidenceData} />
 
@@ -644,380 +435,12 @@ export default function TaskModal() {
             <TodoSection todos={todos} todoDone={todoDone} todoTotal={todoTotal} />
           )}
 
-          {/* Task Notes */}
-          {(task.now || task.ac || task.block || task.eta || (task.review_round || 0) > 0) && (
-            <div className="m-section">
-              <div className="m-sec-label">任务要点</div>
-              <div className="m-rows concise">
-                <div className="m-row">
-                  <div className="mr-label">状态</div>
-                  <div className="mr-val">
-                    <span className={`tag st-${task.state}`}>{stateLabel(task)}</span>
-                    {(task.review_round || 0) > 0 && <span className="muted-inline">磋商 {task.review_round} 轮</span>}
-                  </div>
-                </div>
-                {task.eta && task.eta !== '-' && (
-                  <div className="m-row"><div className="mr-label">预计完成</div><div className="mr-val">{task.eta}</div></div>
-                )}
-                {task.block && task.block !== '无' && task.block !== '-' && (
-                  <div className="m-row alert" style={{ gridColumn: '1/-1' }}><div className="mr-label">阻塞项</div><div className="mr-val">{task.block}</div></div>
-                )}
-                {task.now && task.now !== '-' && (
-                  <div className="m-row" style={{ gridColumn: '1/-1' }}>
-                    <div className="mr-label">当前进展</div>
-                    <div className="mr-val normal">{task.now}</div>
-                  </div>
-                )}
-                {task.ac && (
-                  <div className="m-row" style={{ gridColumn: '1/-1' }}>
-                    <div className="mr-label">验收标准</div>
-                    <div className="mr-val normal">{task.ac}</div>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
+          <TaskNotesSection task={task} />
 
           {/* Live Activity */}
           <LiveActivitySection data={activityData} isDone={['Done', 'Cancelled'].includes(task.state)} logRef={logRef} />
         </div>
       </div>
-    </div>
-  );
-}
-
-function TodoSection({ todos, todoDone, todoTotal }: { todos: TodoItem[]; todoDone: number; todoTotal: number }) {
-  return (
-    <div className="todo-section">
-      <div className="todo-header">
-        <div className="m-sec-label" style={{ marginBottom: 0, border: 'none', padding: 0 }}>
-          子任务清单（{todoDone}/{todoTotal}）
-        </div>
-        <div className="todo-progress">
-          <div className="todo-bar">
-            <div className="todo-bar-fill" style={{ width: `${Math.round((todoDone / todoTotal) * 100)}%` }} />
-          </div>
-          <span>{Math.round((todoDone / todoTotal) * 100)}%</span>
-        </div>
-      </div>
-      <div className="todo-list">
-        {todos.map((td) => {
-          const ico = td.status === 'completed' ? '✅' : td.status === 'in-progress' ? '🔄' : '⬜';
-          const stLabel = td.status === 'completed' ? '已完成' : td.status === 'in-progress' ? '进行中' : '待开始';
-          const stCls = td.status === 'completed' ? 's-done' : td.status === 'in-progress' ? 's-progress' : 's-notstarted';
-          const itemCls = td.status === 'completed' ? 'done' : '';
-          return (
-            <div className={`todo-item ${itemCls}`} key={td.id}>
-              <div className="t-row">
-                <span className="t-icon">{ico}</span>
-                <span className="t-id">#{td.id}</span>
-                <span className="t-title">{td.title}</span>
-                <span className={`t-status ${stCls}`}>{stLabel}</span>
-              </div>
-              {td.detail && <div className="todo-detail">{td.detail}</div>}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function SourcePreviewPanel({
-  data,
-  onClose,
-  onOpenEditor,
-}: {
-  data: SourceFileResult;
-  onClose: () => void;
-  onOpenEditor: (path: string, startLine?: number) => void;
-}) {
-  if (!data.ok) {
-    return (
-      <div className="source-preview">
-        <div className="sp-head">
-          <div className="sp-title">源码片段</div>
-          <button className="sp-close" onClick={onClose}>关闭</button>
-        </div>
-        <div className="cockpit-empty">{data.error || '无法读取文件'}</div>
-      </div>
-    );
-  }
-  return (
-    <div className="source-preview">
-      <div className="sp-head">
-        <div>
-          <div className="sp-title">源码片段</div>
-          <div className="sp-path">{data.path} · {data.viewStart}-{data.viewEnd}/{data.totalLines}</div>
-        </div>
-        <div className="sp-actions">
-          <button
-            className="sp-open"
-            onClick={() => onOpenEditor(data.path, data.startLine || data.viewStart)}
-            title="在本机编辑器打开"
-          >
-            <ExternalLink size={13} />
-            打开编辑器
-          </button>
-          <button className="sp-close" onClick={onClose}>关闭</button>
-        </div>
-      </div>
-      <pre className="sp-code">
-        {data.lines.map((line) => (
-          <div className={`sp-line${line.highlight ? ' hl' : ''}`} key={line.no}>
-            <span className="sp-no">{line.no}</span>
-            <code className="sp-text">{line.text || ' '}</code>
-          </div>
-        ))}
-      </pre>
-    </div>
-  );
-}
-
-function LiveActivitySection({
-  data,
-  isDone,
-  logRef,
-}: {
-  data: TaskActivityData | null;
-  isDone: boolean;
-  logRef: React.RefObject<HTMLDivElement | null>;
-}) {
-  if (!data) return null;
-
-  const activity = data.activity || [];
-  const isActive = (() => {
-    if (!activity.length) return false;
-    const last = activity[activity.length - 1];
-    if (!last.at) return false;
-    const ts = typeof last.at === 'number' ? last.at : new Date(last.at).getTime();
-    return Date.now() - ts < 300000;
-  })();
-
-  const agentParts: string[] = [];
-  if (data.agentLabel) agentParts.push(data.agentLabel);
-  if (data.relatedAgents && data.relatedAgents.length > 1) agentParts.push(`${data.relatedAgents.length}个 Agent`);
-  if (data.lastActive) agentParts.push(`最后活跃: ${formatDashboardDateTime(data.lastActive)}`);
-
-  const phaseDurations = data.phaseDurations || [];
-  const ts = data.todosSummary;
-  const rs = data.resourceSummary;
-  const evidence = data.stateEvidence;
-  const evidenceTone = evidence?.confidence === 'high' || evidence?.confidence === 'complete'
-    ? 'ok'
-    : evidence?.confidence === 'medium'
-      ? 'warn'
-      : 'err';
-  const currentPhase = phaseDurations.find((p) => p.ongoing) || phaseDurations[phaseDurations.length - 1];
-  const timeline = compactActivity(activity);
-
-  return (
-    <div className="la-section">
-      <div className="la-header">
-        <span className="la-title">
-          <span className={`la-dot${isActive ? '' : ' idle'}`} />
-          {isDone ? '执行回顾' : '实时动态'}
-        </span>
-        <span className="la-agent">{agentParts.join(' · ') || '加载中...'}</span>
-      </div>
-
-      <div className="la-insights">
-        {evidence && (
-          <div className={`li-item ${evidenceTone}`}>
-            <span>证据</span>
-            <b>{evidence.label}</b>
-            <em>{evidence.eventCount || 0} 条事件</em>
-          </div>
-        )}
-        {currentPhase && (
-          <div className="li-item">
-            <span>当前耗时</span>
-            <b>{currentPhase.phase}</b>
-            <em>{currentPhase.durationText}{currentPhase.ongoing ? ' · 进行中' : ''}</em>
-          </div>
-        )}
-        {ts && (
-          <div className="li-item">
-            <span>子任务</span>
-            <b>{ts.percent}%</b>
-            <em>{ts.completed}/{ts.total} 完成</em>
-          </div>
-        )}
-        {rs && (rs.totalTokens || rs.totalCost || rs.totalElapsedSec) && (
-          <div className="li-item">
-            <span>资源</span>
-            <b>{rs.totalTokens != null ? rs.totalTokens.toLocaleString() : '—'}</b>
-            <em>{rs.totalCost != null ? `$${rs.totalCost.toFixed(4)}` : ''}{rs.totalElapsedSec != null ? ` · ${rs.totalElapsedSec}s` : ''}</em>
-          </div>
-        )}
-        {data.totalDuration && (
-          <div className="li-item">
-            <span>总耗时</span>
-            <b>{data.totalDuration}</b>
-            <em>{phaseDurations.length} 个阶段</em>
-          </div>
-        )}
-        {data.traceSummary?.traceId && (
-          <div className={`li-item ${data.traceSummary.outbox?.failed ? 'err' : data.traceSummary.outbox?.pending || data.traceSummary.outbox?.running ? 'warn' : 'ok'}`}>
-            <span>Trace</span>
-            <b className="mono">{shortTrace(data.traceSummary.traceId)}</b>
-            <em>{outboxLabel(data.traceSummary.outbox)}</em>
-          </div>
-        )}
-        {data.activityWindow?.truncated && (
-          <div className="li-item">
-            <span>动态</span>
-            <b>{data.activityWindow.returned || activity.length}/{data.activityWindow.total || activity.length}</b>
-            <em>已折叠低信号记录</em>
-          </div>
-        )}
-      </div>
-
-      {ts && (
-        <div className="la-progress-line">
-          <div style={{ width: `${ts.total ? (ts.completed / ts.total) * 100 : 0}%` }} />
-          <div className="active" style={{ width: `${ts.total ? (ts.inProgress / ts.total) * 100 : 0}%` }} />
-        </div>
-      )}
-
-      <div className="la-log" ref={logRef as React.RefObject<HTMLDivElement>}>
-        {timeline.length > 0 ? (
-          timeline.map((a, i) => <ActivityEntryView key={`${activityKey(a)}-${i}`} entry={a} />)
-        ) : (
-          <div className="la-empty">
-            {data.message || data.error || 'Agent 尚未上报进展（等待 Agent 调用 progress 命令）'}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ActivityEntryView({ entry: a }: { entry: ActivityEntry }) {
-  const time = fmtActivityTime(a.at);
-  const agBadge = a.agent ? (
-    <span style={{ fontSize: 9, color: 'var(--muted)', background: 'var(--panel)', padding: '1px 4px', borderRadius: 3, marginRight: 4 }}>
-      {AGENT_LABELS[a.agent] || a.agent}
-    </span>
-  ) : null;
-
-  if (a.kind === 'flow') {
-    return (
-      <div className="la-entry la-flow">
-        <span className="la-icon">↳</span>
-        <span className="la-body">
-          <b>{a.from || '系统'}</b> → <b>{a.to || '未指定'}</b>
-          {a.remark ? <span className="la-rem"> {a.remark}</span> : null}
-        </span>
-        <span className="la-time">{time}</span>
-      </div>
-    );
-  }
-
-  if (a.kind === 'progress') {
-    return (
-      <div className="la-entry la-assistant">
-        <span className="la-icon">🔄</span>
-        <span className="la-body">{agBadge}<b>当前进展：</b>{a.text}</span>
-        <span className="la-time">{time}</span>
-      </div>
-    );
-  }
-
-  if (a.kind === 'todos') {
-    const items = a.items || [];
-    const diffMap = new Map<string, { type: string; from?: string; to?: string }>();
-    if (a.diff) {
-      (a.diff.changed || []).forEach((c) => diffMap.set(c.id, { type: 'changed', from: c.from, to: c.to }));
-      (a.diff.added || []).forEach((c) => diffMap.set(c.id, { type: 'added' }));
-    }
-    return (
-      <div className="la-entry" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 2 }}>
-        <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 2 }}>{agBadge}📝 执行计划</div>
-        {items.map((td) => {
-          const icon = td.status === 'completed' ? '✅' : td.status === 'in-progress' ? '🔄' : '⬜';
-          const d = diffMap.get(String(td.id));
-          const style: React.CSSProperties = td.status === 'completed'
-            ? { opacity: 0.5, textDecoration: 'line-through' }
-            : td.status === 'in-progress'
-              ? { color: '#60a5fa', fontWeight: 'bold' }
-              : {};
-          return (
-            <div key={td.id} style={style}>
-              {icon} {td.title}
-              {d && d.type === 'changed' && d.to === 'completed' && <span style={{ color: '#22c55e', fontSize: 9, marginLeft: 4 }}>✨刚完成</span>}
-              {d && d.type === 'changed' && d.to !== 'completed' && <span style={{ color: '#f59e0b', fontSize: 9, marginLeft: 4 }}>↻{d.from}→{d.to}</span>}
-              {d && d.type === 'added' && <span style={{ color: '#3b82f6', fontSize: 9, marginLeft: 4 }}>🆕新增</span>}
-            </div>
-          );
-        })}
-        {a.diff?.removed?.map((r) => (
-          <div key={r.id} style={{ opacity: 0.4, textDecoration: 'line-through' }}>🗑 {r.title}</div>
-        ))}
-      </div>
-    );
-  }
-
-  if (a.kind === 'assistant') {
-    return (
-      <>
-        {a.thinking && (
-          <div className="la-entry la-thinking">
-            <span className="la-icon">⋯</span>
-            <span className="la-body">
-              {agBadge}
-              <details className="la-evidence">
-                <summary>行动证据：{a.thinking.length > 120 ? `${a.thinking.slice(0, 120)}…` : a.thinking}</summary>
-                <div>{a.thinking}</div>
-              </details>
-            </span>
-            <span className="la-time">{time}</span>
-          </div>
-        )}
-        {a.tools?.map((tc, i) => (
-          <div className="la-entry la-tool" key={i}>
-            <span className="la-icon">🔧</span>
-            <span className="la-body">{agBadge}<span className="la-tool-name">{tc.name}</span><span className="la-trunc">{tc.input_preview || ''}</span></span>
-            <span className="la-time">{time}</span>
-          </div>
-        ))}
-        {a.text && (
-          <div className="la-entry la-assistant">
-            <span className="la-icon">🤖</span>
-            <span className="la-body">{agBadge}{a.text}</span>
-            <span className="la-time">{time}</span>
-          </div>
-        )}
-      </>
-    );
-  }
-
-  if (a.kind === 'tool_result') {
-    const ok = a.exitCode === 0 || a.exitCode === null || a.exitCode === undefined;
-    return (
-      <div className={`la-entry la-tool-result ${ok ? 'ok' : 'err'}`}>
-        <span className="la-icon">{ok ? '✅' : '❌'}</span>
-        <span className="la-body">{agBadge}<span className="la-tool-name">{a.tool || ''}</span>{a.output ? a.output.substring(0, 150) : ''}</span>
-        <span className="la-time">{time}</span>
-      </div>
-    );
-  }
-
-  if (a.kind === 'user') {
-    return (
-      <div className="la-entry la-user">
-        <span className="la-icon">📥</span>
-        <span className="la-body">{agBadge}{a.text || ''}</span>
-        <span className="la-time">{time}</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="la-entry la-tool">
-      <span className="la-icon">•</span>
-      <span className="la-body">{agBadge}<span className="la-tool-name">{a.eventKind || a.kind}</span>{a.text || a.remark || ''}</span>
-      <span className="la-time">{time}</span>
     </div>
   );
 }
