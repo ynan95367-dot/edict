@@ -5,6 +5,7 @@ import type {
   CodingEvent,
   CodingSessionData,
   ExecutionIsolation,
+  IsolationHealth,
   PatchReview,
   WorktreeCheckpoint,
 } from '../../api';
@@ -64,6 +65,29 @@ function sessionStatusLabel(status?: string): string {
   if (status === 'observed') return '已观测';
   if (status === 'unbound') return '未绑定';
   return status || '未绑定';
+}
+
+function IsolationHealthStrip({ health }: { health?: IsolationHealth }) {
+  if (!health) return null;
+  const status = health.status || 'idle';
+  const cls = status === 'ok' ? 'optional' : 'required';
+  const bits = [
+    health.worktreeReady ? 'Worktree 就绪' : health.worktreePath ? 'Worktree 待检查' : '',
+    health.patchRequired ? (health.patchReviewReady ? 'Patch 已记录' : 'Patch 待生成') : '',
+    health.rollbackReady ? 'Rollback 可追溯' : '',
+  ].filter(Boolean);
+  return (
+    <div className={`isolation-strip ${cls}`}>
+      <span>闭环</span>
+      <b className={`tone-${status}`}>{health.label || '隔离状态未知'}</b>
+      <em>{health.detail || health.nextAction || '等待隔离证据'}</em>
+      {!!bits.length && (
+        <div className="isolation-tags">
+          {bits.map((item) => <span key={item}>{item}</span>)}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function CheckpointStrip({ checkpoint }: { checkpoint?: WorktreeCheckpoint }) {
@@ -169,6 +193,7 @@ export function CodingSessionSection({
         <div className="cockpit-cell"><span>事件</span><b>{s.eventCount}</b></div>
       </div>
 
+      <IsolationHealthStrip health={data.isolationHealth} />
       <IsolationStrip isolation={data.executionIsolation} />
       <CheckpointStrip checkpoint={data.checkpoint} />
 

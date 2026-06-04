@@ -894,6 +894,26 @@ export interface CodingSessionSummary {
   confidence?: string;
 }
 
+export interface IsolationHealth {
+  status: 'ok' | 'warn' | 'err' | 'idle' | string;
+  label: string;
+  detail?: string;
+  nextAction?: string;
+  required?: boolean;
+  mode?: string;
+  targetMode?: string;
+  worktreePath?: string;
+  worktreeReady?: boolean;
+  checkpointReady?: boolean;
+  patchRequired?: boolean;
+  patchReviewReady?: boolean;
+  pendingPatchCount?: number;
+  approvedPatchCount?: number;
+  rejectedPatchCount?: number;
+  dirty?: boolean;
+  rollbackReady?: boolean;
+}
+
 export interface WorktreeFile {
   path: string;
   status: string;
@@ -970,6 +990,7 @@ export interface CodingSessionData {
   outputs: CodingEvent[];
   events: CodingEvent[];
   executionIsolation?: ExecutionIsolation;
+  isolationHealth?: IsolationHealth;
   patchReviews?: PatchReview[];
   checkpoint?: WorktreeCheckpoint;
   missingLayers: string[];

@@ -1067,6 +1067,7 @@ def test_patch_review_uses_task_dedicated_worktree_for_diff_checkpoint_and_rejec
     monkeypatch.setattr(srv, 'DATA', data)
     monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data)
 
+    pre_session = srv.get_task_coding_session('JJC-WT-PATCH')
     created = srv.create_patch_review('JJC-WT-PATCH', ['src/app.py'])
     assert created['ok'] is True
     review = created['review']
@@ -1077,7 +1078,13 @@ def test_patch_review_uses_task_dedicated_worktree_for_diff_checkpoint_and_rejec
     assert review['worktreeBranch'] == 'edict/JJC-WT-PATCH'
     assert '+print("two")' in review['diffPreview']
     assert main_file.read_text(encoding='utf-8') == 'print("one")\n'
+    assert pre_session['isolationHealth']['status'] == 'warn'
+    assert pre_session['isolationHealth']['label'] == '变更未生成 Patch 审批'
     assert session['ok'] is True
+    assert session['isolationHealth']['status'] == 'warn'
+    assert session['isolationHealth']['label'] == 'Patch 待审'
+    assert session['isolationHealth']['pendingPatchCount'] == 1
+    assert session['isolationHealth']['worktreeReady'] is True
     assert pathlib.Path(session['checkpoint']['root']).resolve() == worktree.resolve()
     assert session['checkpoint']['dirty'] is True
     assert any(item['path'] == 'src/app.py' for item in session['checkpoint']['files'])

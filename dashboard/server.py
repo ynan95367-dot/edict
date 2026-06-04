@@ -8069,6 +8069,86 @@ def _task_output_group(task_id):
     return None
 
 
+def _task_isolation_health(isolation, checkpoint, patch_reviews):
+    isolation = dict(isolation or {})
+    checkpoint = dict(checkpoint or {})
+    reviews = [item for item in (patch_reviews or []) if isinstance(item, dict)]
+    required = bool(isolation.get('required') or isolation.get('requiresPatchReview') or isolation.get('patchFirst'))
+    mode = str(isolation.get('mode') or '')
+    target_mode = str(isolation.get('targetMode') or '')
+    worktree_path = str(isolation.get('worktreePath') or '').strip()
+    dedicated_required = target_mode == 'dedicated_worktree' or mode == 'dedicated_worktree'
+    patch_required = bool(isolation.get('requiresPatchReview'))
+    pending = sum(1 for item in reviews if item.get('status') == 'pending')
+    approved = sum(1 for item in reviews if item.get('status') == 'approved')
+    rejected = sum(1 for item in reviews if item.get('status') == 'rejected')
+    dirty = bool(checkpoint.get('dirty'))
+    checkpoint_ok = bool(checkpoint.get('ok'))
+    rollback_policy = str(isolation.get('rollback') or '')
+    rollback_ready = bool(rollback_policy and rollback_policy != 'not_required' and (checkpoint_ok or reviews))
+
+    status = 'ok'
+    label = '隔离闭环可追溯'
+    detail = isolation.get('reason') or '执行隔离、checkpoint、patch 审批与回滚证据已合并。'
+    next_action = '继续按当前隔离策略执行。'
+
+    if dedicated_required and not worktree_path:
+        status = 'err'
+        label = '专属 Worktree 未分配'
+        detail = '该任务要求 dedicated worktree，但当前任务尚未记录 worktreePath。'
+        next_action = '重试派发前先完成 worktree 分配；若反复失败，检查 git worktree 权限。'
+    elif worktree_path and not checkpoint_ok:
+        status = 'err'
+        label = 'Checkpoint 不可用'
+        detail = checkpoint.get('error') or '已记录 worktreePath，但无法读取 git checkpoint。'
+        next_action = '检查 worktree 是否仍存在、是否是有效 git worktree。'
+    elif patch_required and dirty and not reviews:
+        status = 'warn'
+        label = '变更未生成 Patch 审批'
+        detail = '工作区已有变更，但还没有 patch review 记录。'
+        next_action = '先生成 Patch 审批，再准奏或驳回。'
+    elif pending:
+        status = 'warn'
+        label = 'Patch 待审'
+        detail = f'已有 {pending} 个 patch review 等待准奏或驳回。'
+        next_action = '完成 patch 审批后再允许提交、推送或收口。'
+    elif dirty and not patch_required:
+        status = 'warn'
+        label = '工作区有未收口变更'
+        detail = '当前 checkpoint 显示工作区仍有变更，需要明确产物或回滚路径。'
+        next_action = '确认这些变更属于本任务，必要时生成审批或归档产物。'
+    elif not required and not dedicated_required:
+        status = 'ok'
+        label = '共享执行可接受'
+        detail = isolation.get('reason') or '该任务未要求专属 worktree 或强制 patch-first。'
+        next_action = '保留输出和关键事件即可。'
+    elif patch_required and approved:
+        status = 'ok'
+        label = 'Patch 已审'
+        detail = f'已有 {approved} 个 patch review 准奏，回滚策略为 {rollback_policy or "未指定"}。'
+        next_action = '按审批结果收口，必要时使用 patch/checkpoint 回滚。'
+
+    return {
+        'status': status,
+        'label': label,
+        'detail': detail,
+        'nextAction': next_action,
+        'required': required,
+        'mode': mode,
+        'targetMode': target_mode,
+        'worktreePath': worktree_path,
+        'worktreeReady': bool(worktree_path and checkpoint_ok),
+        'checkpointReady': checkpoint_ok,
+        'patchRequired': patch_required,
+        'patchReviewReady': bool(reviews),
+        'pendingPatchCount': pending,
+        'approvedPatchCount': approved,
+        'rejectedPatchCount': rejected,
+        'dirty': dirty,
+        'rollbackReady': rollback_ready,
+    }
+
+
 def get_task_coding_session(task_id):
     """Return a normalized Coding Session view for one task.
 
@@ -8250,6 +8330,7 @@ def get_task_coding_session(task_id):
 
     checkpoint = get_worktree_checkpoint(root=patch_root)
     patch_reviews = [_patch_review_public(item) for item in list_patch_reviews(task_id)]
+    isolation_health = _task_isolation_health(execution_isolation, checkpoint, patch_reviews)
     patch_counts = {}
     for review in patch_reviews:
         status = review.get('status', 'unknown')
@@ -8292,11 +8373,13 @@ def get_task_coding_session(task_id):
         'outputs': outputs,
         'events': events[-120:],
         'executionIsolation': execution_isolation,
+        'isolationHealth': isolation_health,
         'patchReviews': patch_reviews[-20:],
         'checkpoint': checkpoint,
         'missingLayers': [item for item in (
             '等待 Agent 上报文件修改事件' if not any(e['kind'] == 'file.change' for e in events) else '',
             '等待 Agent 上报文件读写事件' if not summary['fileCount'] else '',
+            isolation_health.get('label') if isolation_health.get('status') in {'warn', 'err'} else '',
             'OpenCode session 未绑定' if _agent_runtime() == 'opencode' and not runtime_session_id else '',
             '外部编辑器未配置' if not _editor_opener_available() else '',
             'worktree checkpoint 不可用' if not summary['hasWorktreeCheckpoint'] else '',
