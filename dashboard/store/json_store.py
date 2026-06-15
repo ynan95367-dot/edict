@@ -22,6 +22,10 @@ class JsonTaskStore(TaskStore):
 
     def save_tasks(self, tasks: list[dict[str, Any]]) -> None:
         tasks = tasks if isinstance(tasks, list) else []
+        # Intentional divergence from the old raw atomic_json_write: tasks without
+        # 'id' are dropped (with a warning) rather than persisted, matching
+        # SqliteTaskStore. Real tasks always have an id (JJC-…); this guards against
+        # malformed stubs. See contract test test_save_tasks_drops_tasks_without_id.
         kept = [t for t in tasks if t.get("id")]
         if len(kept) != len(tasks):
             log.warning("save_tasks dropped %d task(s) without 'id'", len(tasks) - len(kept))

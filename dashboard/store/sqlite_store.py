@@ -89,6 +89,8 @@ class SqliteTaskStore(TaskStore):
 
     def save_tasks(self, tasks: list[dict[str, Any]]) -> None:
         tasks = tasks if isinstance(tasks, list) else []
+        # Tasks without 'id' cannot be stored (id is the PK); drop with a warning,
+        # consistent with JsonTaskStore. See test_save_tasks_drops_tasks_without_id.
         incoming = [t for t in tasks if t.get("id")]
         if len(incoming) != len(tasks):
             log.warning("save_tasks dropped %d task(s) without 'id'", len(tasks) - len(incoming))

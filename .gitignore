@@ -64,6 +64,6 @@ _*.py
 *.pdf
 
 # SQLite task store
-data/*.db
-data/*.db-wal
-data/*.db-shm
+data/**/*.db
+data/**/*.db-wal
+data/**/*.db-shm
