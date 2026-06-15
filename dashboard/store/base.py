@@ -16,7 +16,10 @@ class TaskStore(abc.ABC):
 
     @abc.abstractmethod
     def save_tasks(self, tasks: list[dict[str, Any]]) -> None:
-        """整体替换任务集合（语义同旧的全量写：未出现的 id 被删除）。"""
+        """整体替换任务集合（语义同旧的全量写：未出现的 id 被删除）。
+
+        每个元素必须含非空 'id'；无 'id' 的元素会被丢弃并记录 warning。
+        """
 
     @abc.abstractmethod
     def get_task(self, task_id: str) -> dict[str, Any] | None:

@@ -10,9 +10,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import pathlib
 import threading
 from typing import Any
+
+log = logging.getLogger("edict.store")
 
 from .base import TaskStore
 
@@ -55,7 +58,6 @@ class SqliteTaskStore(TaskStore):
             CREATE INDEX IF NOT EXISTS idx_tasks_seq ON tasks(seq);
             """
         )
-        conn.commit()
 
     @staticmethod
     def _cols(task: dict[str, Any], seq: int):
@@ -88,6 +90,8 @@ class SqliteTaskStore(TaskStore):
     def save_tasks(self, tasks: list[dict[str, Any]]) -> None:
         tasks = tasks if isinstance(tasks, list) else []
         incoming = [t for t in tasks if t.get("id")]
+        if len(incoming) != len(tasks):
+            log.warning("save_tasks dropped %d task(s) without 'id'", len(tasks) - len(incoming))
         incoming_ids = [str(t.get("id")) for t in incoming]
         conn = self._conn()
         try:
@@ -115,14 +119,19 @@ class SqliteTaskStore(TaskStore):
         if not tid:
             raise ValueError("task missing 'id'")
         conn = self._conn()
-        row = conn.execute("SELECT seq FROM tasks WHERE id=?", (tid,)).fetchone()
-        if row is not None and row["seq"] is not None:
-            seq = row["seq"]
-        else:
-            mx = conn.execute("SELECT MAX(seq) AS m FROM tasks").fetchone()["m"]
-            seq = 0 if mx is None else mx + 1
-        conn.execute(self._UPSERT, self._cols(task, seq))
-        conn.commit()
+        try:
+            conn.execute("BEGIN")
+            row = conn.execute("SELECT seq FROM tasks WHERE id=?", (tid,)).fetchone()
+            if row is not None and row["seq"] is not None:
+                seq = row["seq"]
+            else:
+                mx = conn.execute("SELECT MAX(seq) AS m FROM tasks").fetchone()["m"]
+                seq = 0 if mx is None else mx + 1
+            conn.execute(self._UPSERT, self._cols(task, seq))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     def delete_task(self, task_id: str) -> bool:
         conn = self._conn()

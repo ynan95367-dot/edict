@@ -71,3 +71,10 @@ def test_full_fidelity_nested_fields(store):
 def test_load_preserves_save_order(store):
     store.save_tasks([{"id": "C"}, {"id": "A"}, {"id": "B"}])
     assert [t["id"] for t in store.load_tasks()] == ["C", "A", "B"]
+
+
+def test_save_tasks_drops_tasks_without_id(store):
+    store.save_tasks([{"title": "orphan"}, {"id": "B", "state": "Doing"}])
+    loaded = store.load_tasks()
+    assert [t.get("id") for t in loaded] == ["B"]
+    assert store.count() == 1

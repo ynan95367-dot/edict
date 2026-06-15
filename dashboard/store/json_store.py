@@ -1,8 +1,11 @@
 """JsonTaskStore —— 包装现有 file_lock 行为，与旧 load/save 完全等价。"""
 from __future__ import annotations
 
+import logging
 import pathlib
 from typing import Any
+
+log = logging.getLogger("edict.store")
 
 from file_lock import atomic_json_read, atomic_json_update, atomic_json_write
 
@@ -18,7 +21,11 @@ class JsonTaskStore(TaskStore):
         return data if isinstance(data, list) else []
 
     def save_tasks(self, tasks: list[dict[str, Any]]) -> None:
-        atomic_json_write(self.path, tasks if isinstance(tasks, list) else [])
+        tasks = tasks if isinstance(tasks, list) else []
+        kept = [t for t in tasks if t.get("id")]
+        if len(kept) != len(tasks):
+            log.warning("save_tasks dropped %d task(s) without 'id'", len(tasks) - len(kept))
+        atomic_json_write(self.path, kept)
 
     def get_task(self, task_id: str) -> dict[str, Any] | None:
         for t in self.load_tasks():
