@@ -62,3 +62,8 @@ _*.py
 # Generated docs
 *.docx
 *.pdf
+
+# SQLite task store
+data/*.db
+data/*.db-wal
+data/*.db-shm
