@@ -1,8 +1,11 @@
+import logging
 import os
 import pathlib
 import threading
 
 from .base import TaskStore
+
+log = logging.getLogger("edict.store")
 from .json_store import JsonTaskStore
 from .sqlite_store import SqliteTaskStore
 from .shadow_store import ShadowTaskStore
@@ -19,11 +22,16 @@ _lock = threading.Lock()
 def reset_task_store() -> None:
     """测试用：清掉单例。"""
     global _store
-    _store = None
+    with _lock:
+        _store = None
 
 
 def get_task_store(data_dir: str | pathlib.Path | None = None) -> TaskStore:
-    """按 EDICT_TASK_STORE 选实现（json|sqlite|shadow），进程内单例。"""
+    """按 EDICT_TASK_STORE 选实现（json|sqlite|shadow），进程内单例。
+
+    `data_dir` 仅在首次构建时生效；后续调用传入的 `data_dir` 会被忽略。
+    服务端应保证每次传入相同路径（或不传，依赖环境变量）。
+    """
     global _store
     if _store is not None:
         return _store
@@ -46,4 +54,6 @@ def _build_store(data_dir) -> TaskStore:
         return SqliteTaskStore(db_path)
     if backend == "shadow":
         return ShadowTaskStore(JsonTaskStore(json_path), SqliteTaskStore(db_path))
+    if backend != "json":
+        log.warning("unknown EDICT_TASK_STORE=%r, falling back to json", backend)
     return JsonTaskStore(json_path)

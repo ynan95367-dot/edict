@@ -27,8 +27,15 @@ class ShadowTaskStore(TaskStore):
         p = self.primary.load_tasks()
         try:
             s = self.secondary.load_tasks()
-            if _by_id(p) != _by_id(s):
-                log.warning("shadow divergence: primary=%d secondary=%d", len(p), len(s))
+            pb, sb = _by_id(p), _by_id(s)
+            if pb != sb:
+                p_ids, s_ids = set(pb), set(sb)
+                content_differs = sorted(k for k in (p_ids & s_ids) if pb[k] != sb[k])
+                log.warning(
+                    "shadow divergence: primary=%d secondary=%d "
+                    "only_in_primary=%s only_in_secondary=%s content_differs=%s",
+                    len(p), len(s), sorted(p_ids - s_ids), sorted(s_ids - p_ids), content_differs,
+                )
         except Exception as e:  # noqa: BLE001
             log.warning("shadow secondary read failed: %s", e)
         return p
