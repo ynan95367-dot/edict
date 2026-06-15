@@ -26,6 +26,7 @@ from auth import init as auth_init, requires_auth, extract_token, verify_token, 
 scripts_dir = str(pathlib.Path(__file__).parent.parent / 'scripts')
 sys.path.insert(0, scripts_dir)
 from file_lock import atomic_json_read, atomic_json_write, atomic_json_update
+from store import get_task_store
 from utils import validate_url, read_json, now_iso, python_bin
 import runtime_outbox as _runtime_outbox
 from runtime_outbox import (
@@ -441,13 +442,11 @@ def get_task_data_dir():
 
 
 def load_tasks():
-    task_data_dir = get_task_data_dir()
-    return atomic_json_read(task_data_dir / 'tasks_source.json', [])
+    return get_task_store(get_task_data_dir()).load_tasks()
 
 
 def save_tasks(tasks):
-    task_data_dir = get_task_data_dir()
-    atomic_json_write(task_data_dir / 'tasks_source.json', tasks)
+    get_task_store(get_task_data_dir()).save_tasks(tasks)
     _trigger_refresh()
 
 
