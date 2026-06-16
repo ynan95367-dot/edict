@@ -37,10 +37,16 @@ def _raw_sse_connect(port, timeout=5):
     return sock
 
 
-def _recv_lines_until(sock, needle: bytes, deadline: float) -> bytes:
-    """Read from sock character-by-character until needle found or deadline."""
-    accumulated = b""
-    buf = b""
+def _recv_lines_until(sock, needle: bytes, deadline: float, seed: bytes = b"") -> bytes:
+    """Read from sock until needle found or deadline.
+
+    ``seed`` may contain bytes already received (e.g. body bytes that arrived
+    in the same TCP segment as the HTTP headers).  They are prepended to the
+    accumulator so no data is lost regardless of TCP segmentation.
+    """
+    accumulated = seed
+    if needle in accumulated:
+        return accumulated
     while time.time() < deadline:
         remaining = deadline - time.time()
         if remaining <= 0:
@@ -54,7 +60,6 @@ def _recv_lines_until(sock, needle: bytes, deadline: float) -> bytes:
             break
         if not chunk:
             break
-        buf += chunk
         accumulated += chunk
         if needle in accumulated:
             break
@@ -62,7 +67,13 @@ def _recv_lines_until(sock, needle: bytes, deadline: float) -> bytes:
 
 
 def _read_http_response(sock, deadline: float):
-    """Read HTTP response headers from sock; return (status_line, headers_dict)."""
+    """Read HTTP response headers from sock.
+
+    Returns ``(status_line, headers_dict, body_so_far)`` where ``body_so_far``
+    holds any bytes that arrived in the same TCP segment(s) as the headers but
+    after the ``\\r\\n\\r\\n`` separator.  Callers must seed subsequent reads
+    with this value so no SSE frames are silently discarded.
+    """
     raw = b""
     while b"\r\n\r\n" not in raw and time.time() < deadline:
         remaining = deadline - time.time()
@@ -76,7 +87,7 @@ def _read_http_response(sock, deadline: float):
         if not chunk:
             break
         raw += chunk
-    header_part, _, _ = raw.partition(b"\r\n\r\n")
+    header_part, _, body_so_far = raw.partition(b"\r\n\r\n")
     lines = header_part.split(b"\r\n")
     status_line = lines[0].decode(errors="replace") if lines else ""
     headers = {}
@@ -84,7 +95,7 @@ def _read_http_response(sock, deadline: float):
         if b":" in line:
             k, _, v = line.decode(errors="replace").partition(":")
             headers[k.strip().lower()] = v.strip()
-    return status_line, headers
+    return status_line, headers, body_so_far
 
 
 def test_stream_sends_event_stream_headers_and_initial_event(sse_server):
@@ -92,11 +103,11 @@ def test_stream_sends_event_stream_headers_and_initial_event(sse_server):
     sock = _raw_sse_connect(port, timeout=5)
     try:
         deadline = time.time() + 5
-        status_line, headers = _read_http_response(sock, deadline)
+        status_line, headers, body_so_far = _read_http_response(sock, deadline)
         assert "200" in status_line
         assert "text/event-stream" in headers.get("content-type", "")
-        # initial frame is written immediately on connect
-        chunk = _recv_lines_until(sock, b"live-status", deadline)
+        # initial frame may have already arrived coalesced with the headers
+        chunk = _recv_lines_until(sock, b"live-status", deadline, seed=body_so_far)
         assert b"live-status" in chunk
     finally:
         sock.close()
@@ -106,10 +117,11 @@ def test_stream_emits_on_live_status_change(sse_server):
     _srv, data_dir, port = sse_server
     sock = _raw_sse_connect(port, timeout=8)
     try:
-        # consume initial frame + headers
+        # consume initial frame + headers; seed the scan with any body bytes
+        # that arrived coalesced with the headers so no SSE frames are lost
         init_deadline = time.time() + 5
-        _read_http_response(sock, init_deadline)
-        _recv_lines_until(sock, b"live-status", init_deadline)
+        _, _, body_so_far = _read_http_response(sock, init_deadline)
+        _recv_lines_until(sock, b"live-status", init_deadline, seed=body_so_far)
         time.sleep(0.2)
         # mutate live_status.json -> bump mtime
         (data_dir / "live_status.json").write_text('{"tasks":{}}', encoding="utf-8")
