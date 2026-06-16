@@ -82,20 +82,22 @@ type CodingEvent =
 - 任务详情新增 Coding Session 驾驶舱。
 - 输出文件页已按任务分组。
 - 当前先从现有任务数据、OpenCode storage、event ledger 推导 session，后续再切到持久化 event store。
+- RunGraph MVP 已接入 RunSpec：预览和创建任务时生成执行图，包含治理节点、Policy Gate、执行隔离、Runtime、能力调用和产物归档。
+- Command Center 已显示执行图摘要和节点列表；门下省准奏释放 Policy Gate 后会刷新执行图状态。
+- 旧版单文件 UI 已从产品入口清除：`dashboard/dashboard.html` 移除，`/`、`/dashboard` 统一返回 React 构建产物，`/dashboard.html` 仅作为历史别名跳转到 `/dashboard`。
 
-## 后续路线
+## 后续路线（更新后）
 
-1. Event Store 固化：把推导结果逐步改成追加写入。
-2. File jump：为 `file.read`、`file.change` 增加行号，支持 IDE 跳转。
-3. Pending patch：Agent 不直接改主工作区，先生成 patch。
-4. Patch API：`/patches/{id}/accept`、`/reject`、`/apply`、`/revert`。
-5. Worktree checkpoint：每个任务独立 worktree 或 checkpoint。
-6. VS Code 插件 MVP：任务列表、事件流、文件跳转、diff 打开。
-7. IDE Cockpit：accept/reject、测试、提交、PR、奏折归档。
+1. Event Store 固化：把推导结果逐步改成追加写入，并让 RunEvent 成为 RunGraph 节点状态的真实来源。
+2. Runtime trace 绑定：把 OpenCode/OpenClaw session id、traceId 和 task id 强绑定，避免只靠输出解析回填。
+3. RunGraph 深化：补节点级耗时、失败原因、重试次数、runtime outbox/dead-letter 入口。
+4. VS Code 插件 MVP：任务列表、事件流、文件跳转、diff 打开。
+5. IDE Cockpit：accept/reject、测试、提交、PR、奏折归档。
 
 ## 验收标准
 
 - 任一任务详情能看到 Todo、文件、命令、测试、产物、最近事件。
 - 任务输出文件可从任务组进入，而不是全局文件柜里翻找。
 - OpenCode/OpenClaw 的底层事件能统一映射到同一个 session schema。
+- Command Center 能在任务创建前看到 RunGraph，并在 Policy Gate 释放后看到图状态从等待变为就绪。
 - 后续 IDE 插件不需要重新定义协议，只消费 Coding Gateway API。

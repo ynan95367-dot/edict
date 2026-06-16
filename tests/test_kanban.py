@@ -439,3 +439,58 @@ def test_state_change_writes_handoff_outbox(monkeypatch, tmp_path):
     assert outbox[0]['taskId'] == 'T-HANDOFF'
     assert outbox[0]['state'] == 'Zhongshu'
     assert outbox[0]['agentId'] == 'zhongshu'
+
+
+def test_done_for_missing_task_does_not_write_handoff(monkeypatch, tmp_path):
+    """A stale agent command for a missing task should be rejected locally."""
+    import runtime_outbox
+
+    tasks_path = tmp_path / 'tasks_source.json'
+    outbox_path = tmp_path / 'runtime_outbox.json'
+    tasks_path.write_text('[]', encoding='utf-8')
+
+    monkeypatch.setattr(kb, 'TASKS_FILE', tasks_path)
+    monkeypatch.setattr(runtime_outbox, 'OUTBOX_FILE', outbox_path)
+    monkeypatch.setattr(kb, '_trigger_refresh', lambda: None)
+    monkeypatch.setattr(kb, '_ledger_append_event', None)
+
+    kb.cmd_done('T-MISSING', '', 'stale command')
+
+    assert not outbox_path.exists()
+
+
+def test_outbox_dedupe_rebinds_trace_and_payload(monkeypatch, tmp_path):
+    """Duplicate unfinished dispatches should keep the current task trace binding."""
+    import runtime_outbox
+
+    outbox_path = tmp_path / 'runtime_outbox.json'
+    monkeypatch.setattr(runtime_outbox, 'OUTBOX_FILE', outbox_path)
+
+    first = runtime_outbox.enqueue_dispatch(
+        task_id='T-TRACE',
+        state='Doing',
+        agent_id='bingbu',
+        trigger='state-transition',
+        dispatch_id='dispatch_old',
+        trace_id='trc_old',
+        payload={'traceId': 'trc_old', 'runSpecId': 'run_old'},
+    )
+    second = runtime_outbox.enqueue_dispatch(
+        task_id='T-TRACE',
+        state='Doing',
+        agent_id='bingbu',
+        trigger='state-transition',
+        dispatch_id='dispatch_new',
+        trace_id='trc_new',
+        payload={'traceId': 'trc_new', 'runSpecId': 'run_new'},
+    )
+
+    outbox = json.loads(outbox_path.read_text(encoding='utf-8'))
+    assert len(outbox) == 1
+    assert first['id'] == 'dispatch_old'
+    assert second['id'] == 'dispatch_old'
+    assert second['deduped'] is True
+    assert outbox[0]['traceId'] == 'trc_new'
+    assert outbox[0]['payload']['runSpecId'] == 'run_new'
+    assert outbox[0]['result']['previousTraceId'] == 'trc_old'
+    assert outbox[0]['result']['duplicateEventId'] == 'dispatch_new'

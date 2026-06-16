@@ -1,9 +1,10 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { X } from 'lucide-react';
+import { CheckCircle2, ShieldAlert, X, XCircle } from 'lucide-react';
 import { useStore, getPipeStatus, stateLabel } from '../store';
 import { api } from '../api';
 import { CodingSessionSection } from './task-modal/CodingSessionSection';
 import { EvidenceChainSection } from './task-modal/EvidenceChainSection';
+import { ExecutionNarrativePanel } from './task-modal/ExecutionNarrativePanel';
 import { GovernanceMap } from './task-modal/GovernanceMap';
 import { LiveActivitySection } from './task-modal/LiveActivitySection';
 import { SchedulerDiagnosisPanel } from './task-modal/SchedulerDiagnosisPanel';
@@ -16,6 +17,7 @@ import {
   agentLabel,
   dispatchInfo,
   NEXT_LABELS,
+  outboxLabel,
   runtimeSessionLabel,
   runtimeSessionTone,
   SCHED_ACTION_LABELS,
@@ -27,7 +29,158 @@ import type {
   CodingSessionData,
   TaskEvidenceData,
   SourceFileResult,
+  PolicyGate,
+  ToolPolicy,
 } from '../api';
+
+type ApprovalView = {
+  visible: boolean;
+  tone: 'warn' | 'err' | 'ok';
+  title: string;
+  subject: string;
+  reason: string;
+  approveEffect: string;
+  rejectEffect: string;
+  permissions: string[];
+  mode: 'policy' | 'menxia' | 'review' | 'confirm';
+};
+
+const GATE_RELEASED = new Set(['approved', 'released', 'bypassed']);
+const DIAGNOSTIC_LAYER_LABELS: Record<string, string> = {
+  approval: '审批',
+  runtime: '运行时',
+  model: '模型',
+  queue: '执行请求',
+  workspace: '工作区',
+  scheduler: '调度器',
+  agent: 'Agent 回写',
+  flow: '流程',
+};
+
+function approvalIsWaiting(gate?: PolicyGate | null): boolean {
+  if (!gate) return false;
+  const decision = String(gate.decision || '');
+  const status = String(gate.status || '');
+  return decision !== 'auto_dispatch' && !GATE_RELEASED.has(status);
+}
+
+function approvalViewForTask(args: {
+  taskState: string;
+  taskTitle: string;
+  taskNow?: string;
+  taskOutput?: string;
+  pendingConfirm?: {
+    target_state?: string;
+    requested_by?: string;
+    requested_at?: string;
+    confirm_by?: string;
+  } | null;
+  expectedAgent: string;
+  dispatchStatus?: string;
+  dispatchError?: string;
+  policyGate?: PolicyGate | null;
+  toolPolicy?: ToolPolicy | null;
+}): ApprovalView | null {
+  const policyWaiting = approvalIsWaiting(args.policyGate) || args.dispatchStatus === 'policy-held';
+  const permissions = [
+    ...((args.policyGate?.permissionLabels || []) as string[]),
+    ...((args.toolPolicy?.permissionLabels || []) as string[]),
+    ...((args.toolPolicy?.permissions || []) as string[]),
+  ].filter(Boolean).slice(0, 6);
+  const reason = args.policyGate?.reason || args.toolPolicy?.approvalReason || args.dispatchError || '';
+  if (policyWaiting) {
+    return {
+      visible: true,
+      tone: 'warn',
+      mode: 'policy',
+      title: '需要你确认执行权限',
+      subject: args.taskTitle || '当前任务',
+      reason: reason || '这个任务会触发高风险能力或命令执行，系统已暂停自动交办。',
+      approveEffect: `准奏后：释放权限闸门，并继续交给 ${args.expectedAgent || '目标官署'} 执行。`,
+      rejectEffect: '封驳后：退回中书省修订，当前执行请求不会继续。',
+      permissions,
+    };
+  }
+  if (args.taskState === 'PendingConfirm') {
+    const subject = [args.taskTitle || '当前任务', args.taskOutput || ''].filter(Boolean).join(' · ');
+    const targetState = args.pendingConfirm?.target_state || '';
+    const targetLabel = targetState ? (NEXT_LABELS[targetState] || targetState) : '待确认目标';
+    return {
+      visible: true,
+      tone: 'warn',
+      mode: 'confirm',
+      title: '需要你最终确认结果',
+      subject,
+      reason: reason || args.taskNow || `执行方已提交收口请求，等待你确认是否进入 ${targetLabel}。`,
+      approveEffect: `准奏后：进入 ${targetLabel}${targetState === 'Done' ? '，任务收口完成' : ''}。`,
+      rejectEffect: '封驳后：退回尚书省复审，继续补充或修正结果。',
+      permissions,
+    };
+  }
+  if (args.taskState === 'Menxia') {
+    return {
+      visible: true,
+      tone: 'warn',
+      mode: 'menxia',
+      title: '需要你审议方案',
+      subject: args.taskTitle || '中书省方案',
+      reason: reason || '门下省正在等你判断方案是否可以进入执行。',
+      approveEffect: '准奏后：交给尚书省安排执行。',
+      rejectEffect: '封驳后：退回中书省修订方案。',
+      permissions,
+    };
+  }
+  if (args.taskState === 'Review') {
+    return {
+      visible: true,
+      tone: 'warn',
+      mode: 'review',
+      title: '需要你审查结果',
+      subject: args.taskTitle || '执行结果',
+      reason: reason || '任务已进入回奏审查，等你确认是否收口。',
+      approveEffect: '准奏后：任务进入完成状态。',
+      rejectEffect: '封驳后：退回中书省重新修订。',
+      permissions,
+    };
+  }
+  return null;
+}
+
+function ImperialApprovalPanel({
+  approval,
+  onReview,
+}: {
+  approval: ApprovalView;
+  onReview: (action: 'approve' | 'reject') => void;
+}) {
+  return (
+    <section className={`imperial-approval ${approval.tone}`}>
+      <div className="ia-icon"><ShieldAlert size={20} /></div>
+      <div className="ia-main">
+        <div className="ia-kicker">皇上待决</div>
+        <h3>{approval.title}</h3>
+        <p>{approval.reason}</p>
+        <div className="ia-subject">
+          <span>审批对象</span>
+          <b>{approval.subject}</b>
+        </div>
+        {approval.permissions.length > 0 && (
+          <div className="ia-permissions">
+            {approval.permissions.map((item) => <span key={item}>{item}</span>)}
+          </div>
+        )}
+        <div className="ia-effects">
+          <div><span>准奏</span><b>{approval.approveEffect}</b></div>
+          <div><span>封驳</span><b>{approval.rejectEffect}</b></div>
+        </div>
+      </div>
+      <div className="ia-actions">
+        <button className="ia-approve" onClick={() => onReview('approve')}><CheckCircle2 size={15} />准奏</button>
+        <button className="ia-reject" onClick={() => onReview('reject')}><XCircle size={15} />封驳</button>
+      </div>
+    </section>
+  );
+}
 
 export default function TaskModal() {
   const modalTaskId = useStore((s) => s.modalTaskId);
@@ -42,48 +195,75 @@ export default function TaskModal() {
   const [evidenceData, setEvidenceData] = useState<TaskEvidenceData | null>(null);
   const [sourcePreview, setSourcePreview] = useState<SourceFileResult | null>(null);
   const [schedActionFeedback, setSchedActionFeedback] = useState<SchedulerActionFeedback | null>(null);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [activityOpen, setActivityOpen] = useState(false);
   const laTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
+  const modalTaskIdRef = useRef<string | null>(null);
+  const activityInFlightRef = useRef(false);
+  const schedInFlightRef = useRef(false);
+  const codingInFlightRef = useRef(false);
+  const evidenceInFlightRef = useRef(false);
 
   const task = liveStatus?.tasks?.find((t) => t.id === modalTaskId) || null;
 
+  useEffect(() => {
+    modalTaskIdRef.current = modalTaskId;
+  }, [modalTaskId]);
+
   const fetchActivity = useCallback(async () => {
-    if (!modalTaskId) return;
+    if (!modalTaskId || activityInFlightRef.current) return;
+    const taskId = modalTaskId;
+    activityInFlightRef.current = true;
     try {
-      const d = await api.taskActivity(modalTaskId);
-      setActivityData(d);
+      const d = await api.taskActivity(taskId);
+      if (modalTaskIdRef.current === taskId) setActivityData(d);
     } catch {
-      setActivityData(null);
+      // Keep the last good snapshot to avoid UI sections blinking during transient backend work.
+    } finally {
+      activityInFlightRef.current = false;
     }
   }, [modalTaskId]);
 
   const fetchSched = useCallback(async () => {
-    if (!modalTaskId) return;
+    if (!modalTaskId || schedInFlightRef.current) return;
+    const taskId = modalTaskId;
+    schedInFlightRef.current = true;
     try {
-      const d = await api.schedulerState(modalTaskId);
-      setSchedData(d);
+      const d = await api.schedulerState(taskId);
+      if (modalTaskIdRef.current === taskId) setSchedData(d);
     } catch {
-      setSchedData(null);
+      // Preserve last good data; the collapsed diagnostics summary should not disappear.
+    } finally {
+      schedInFlightRef.current = false;
     }
   }, [modalTaskId]);
 
   const fetchCodingSession = useCallback(async () => {
-    if (!modalTaskId) return;
+    if (!modalTaskId || codingInFlightRef.current) return;
+    const taskId = modalTaskId;
+    codingInFlightRef.current = true;
     try {
-      const d = await api.codingSession(modalTaskId);
-      setCodingData(d);
+      const d = await api.codingSession(taskId);
+      if (modalTaskIdRef.current === taskId) setCodingData(d);
     } catch {
-      setCodingData(null);
+      // Preserve last good data; this endpoint may touch git/worktree state.
+    } finally {
+      codingInFlightRef.current = false;
     }
   }, [modalTaskId]);
 
   const fetchEvidence = useCallback(async () => {
-    if (!modalTaskId) return;
+    if (!modalTaskId || evidenceInFlightRef.current) return;
+    const taskId = modalTaskId;
+    evidenceInFlightRef.current = true;
     try {
-      const d = await api.taskEvidence(modalTaskId);
-      setEvidenceData(d);
+      const d = await api.taskEvidence(taskId);
+      if (modalTaskIdRef.current === taskId) setEvidenceData(d);
     } catch {
-      setEvidenceData(null);
+      // Preserve last good data; avoid section mount/unmount flicker.
+    } finally {
+      evidenceInFlightRef.current = false;
     }
   }, [modalTaskId]);
 
@@ -142,26 +322,39 @@ export default function TaskModal() {
   }, [fetchCodingSession, loadAll, toast]);
 
   useEffect(() => {
+    setActivityData(null);
+    setSchedData(null);
+    setCodingData(null);
+    setEvidenceData(null);
     setSourcePreview(null);
     setSchedActionFeedback(null);
-    setEvidenceData(null);
+    setDiagnosticsOpen(false);
+    setActivityOpen(false);
+    activityInFlightRef.current = false;
+    schedInFlightRef.current = false;
+    codingInFlightRef.current = false;
+    evidenceInFlightRef.current = false;
   }, [modalTaskId]);
 
   useEffect(() => {
     if (!modalTaskId || !task) return;
     fetchActivity();
     fetchSched();
-    fetchCodingSession();
-    fetchEvidence();
+    if (diagnosticsOpen) {
+      fetchCodingSession();
+      fetchEvidence();
+    }
 
     const isDone = ['Done', 'Cancelled'].includes(task.state);
     if (!isDone) {
       laTimerRef.current = setInterval(() => {
         fetchActivity();
         fetchSched();
-        fetchCodingSession();
-        fetchEvidence();
-      }, 4000);
+        if (diagnosticsOpen) {
+          fetchCodingSession();
+          fetchEvidence();
+        }
+      }, diagnosticsOpen ? 6000 : 8000);
     }
 
     return () => {
@@ -170,7 +363,7 @@ export default function TaskModal() {
         laTimerRef.current = null;
       }
     };
-  }, [modalTaskId, task?.state, fetchActivity, fetchSched, fetchCodingSession, fetchEvidence]);
+  }, [modalTaskId, task?.state, diagnosticsOpen, fetchActivity, fetchSched, fetchCodingSession, fetchEvidence]);
 
   // scroll log on new entries
   useEffect(() => {
@@ -209,7 +402,16 @@ export default function TaskModal() {
 
   const doReview = async (action: string) => {
     const labels: Record<string, string> = { approve: '准奏', reject: '封驳' };
-    const comment = prompt(`${labels[action]} ${task.id}\n\n请输入批注（可留空）：`);
+    const gate = task.runSpec?.policyGate;
+    const approvalReason = gate?.reason || task.now || schedData?.dispatchDiagnosis?.detail || '请根据当前任务状态判断是否继续。';
+    const approvalSubject = task.title || task.id;
+    const comment = prompt(
+      `${labels[action]} ${task.id}\n` +
+      `审批对象：${approvalSubject}\n` +
+      `当前阶段：${stateLabel(task)}\n` +
+      `系统提示：${approvalReason}\n\n` +
+      '请输入批注（可留空）：'
+    );
     if (comment === null) return;
     try {
       const r = await api.reviewAction(task.id, action, comment || '');
@@ -246,7 +448,7 @@ export default function TaskModal() {
   const doSchedAction = async (action: string, reasonOverride?: string, source: 'manual' | 'diagnosis' = 'manual') => {
     if (!['scan', 'retry', 'escalate', 'rollback'].includes(action)) return;
     if (!canMutateSchedule && action !== 'scan') {
-      toast('终态任务不再派发；需要继续时请先恢复任务', 'err');
+      toast('终态任务不再交办执行；需要继续时请先恢复任务', 'err');
       return;
     }
     const actionLabel = SCHED_ACTION_LABELS[action] || '处理';
@@ -255,7 +457,7 @@ export default function TaskModal() {
       setSchedActionFeedback({
         action,
         label: `${labelPrefix}${actionLabel}`,
-        detail: '正在扫描运行证据和派发队列...',
+        detail: '正在扫描运行证据和执行队列...',
         tone: 'warn',
         pending: true,
       });
@@ -338,6 +540,20 @@ export default function TaskModal() {
   const sessionLabel = runtimeSessionLabel(runtimeSession?.status);
   const diagnosisAction = dispatchDiagnosis?.action;
   const canRunDiagnosisAction = !!diagnosisAction && ['scan', 'retry', 'escalate', 'rollback'].includes(diagnosisAction) && (canMutateSchedule || diagnosisAction === 'scan');
+  const approvalView = approvalViewForTask({
+    taskState: task.state,
+    taskTitle: task.title,
+    taskNow: task.now,
+    taskOutput: task.output,
+    pendingConfirm: task.pending_confirm || null,
+    expectedAgent,
+    dispatchStatus: sched?.lastDispatchStatus,
+    dispatchError: sched?.lastDispatchError,
+    policyGate: codingData?.runSpec?.policyGate || task.runSpec?.policyGate || null,
+    toolPolicy: codingData?.runSpec?.toolPolicy || task.runSpec?.toolPolicy || null,
+  });
+  const nextActionText = dispatchDiagnosis?.nextAction || (isTerminalTask ? '查看执行回顾或输出文件' : '等待 Agent 回写进展，必要时执行扫描');
+  const primaryNextActionText = approvalView?.visible ? '先处理皇上待决，再继续交办执行' : nextActionText;
   const doneStages = stages.filter((s) => s.status === 'done').length;
   const completedStageCount = task.state === 'Done' ? stages.length : doneStages;
   const controlTone = dispatchDiagnosis?.tone || dInfo.tone;
@@ -345,7 +561,32 @@ export default function TaskModal() {
     ? `${activeStage.dept} · ${activeStage.action}`
     : stateLabel(task);
   const controlDetail = dispatchDiagnosis?.detail || task.now || (activeStage ? `当前由${activeStage.dept}处理` : '等待任务状态刷新');
-  const nextActionText = dispatchDiagnosis?.nextAction || (isTerminalTask ? '查看执行回顾或输出文件' : '等待 Agent 回写进展，必要时执行扫描');
+  const evidenceHealth = evidenceData?.health?.status || '';
+  const diagnosticTone = evidenceHealth === 'err' || dispatchDiagnosis?.tone === 'err' || dInfo.tone === 'err'
+    ? 'err'
+    : evidenceHealth === 'warn' || dispatchDiagnosis?.tone === 'warn' || dInfo.tone === 'warn'
+      ? 'warn'
+      : evidenceHealth === 'ok' || dispatchDiagnosis?.tone === 'ok' || dInfo.tone === 'ok'
+        ? 'ok'
+        : 'idle';
+  const graphSummary = codingData?.runSpec?.runGraph?.summary;
+  const blockingLayerLabel = dispatchDiagnosis?.blockingLayer
+    ? DIAGNOSTIC_LAYER_LABELS[dispatchDiagnosis.blockingLayer] || dispatchDiagnosis.blockingLayer
+    : '';
+  const diagnosticMeta = [
+    blockingLayerLabel ? `卡点 ${blockingLayerLabel}` : '',
+    dispatchDiagnosis?.actionLabel ? `建议 ${dispatchDiagnosis.actionLabel}` : '',
+    outbox && (outbox.running || outbox.pending || outbox.failed) ? `执行请求 ${outboxLabel(outbox)}` : '',
+    graphSummary ? `执行图 ${graphSummary.nodeCount || 0} 节点` : '',
+  ].filter(Boolean).join(' · ') || '无当前阻塞';
+  const diagnosticLabel = dispatchDiagnosis?.label || evidenceData?.health?.label || dInfo.label || '运行证据';
+  const activityCount = activityData?.activity?.length || 0;
+  const activityLabel = isTerminalTask ? '执行回顾' : '实时动态';
+  const activityMeta = [
+    activityData?.agentLabel || '',
+    activityData?.lastActive ? `最后活跃 ${activityData.lastActive.replace('T', ' ').slice(0, 16)}` : '',
+    activityCount ? `${activityCount} 条记录` : '',
+  ].filter(Boolean).join(' · ') || '等待 Agent 上报';
 
   return (
     <div className="modal-bg open" onClick={close}>
@@ -362,20 +603,26 @@ export default function TaskModal() {
             <div className="modal-title">{task.title || '(无标题)'}</div>
           </div>
 
-          <div className={`task-control ${controlTone}`}>
-            <div className="task-control-main">
-              <div className="task-control-icon">{activeStage?.icon || '•'}</div>
-              <div className="task-control-copy">
-                <span>当前状态</span>
-                <b>{stageLine}</b>
-                <p>{controlDetail}</p>
-              </div>
-            </div>
-            <div className="task-control-next">
-              <span>建议动作</span>
-              <b>{nextActionText}</b>
-            </div>
-          </div>
+          <ExecutionNarrativePanel
+            task={task}
+            stageLine={stageLine}
+            controlTone={controlTone}
+            currentDetail={controlDetail}
+            nextActionText={primaryNextActionText}
+            approval={approvalView}
+            sched={sched}
+            stalledSec={stalledSec}
+            dispatchDiagnosis={dispatchDiagnosis}
+            expectedAgent={expectedAgent}
+            traceId={traceId}
+            outbox={outbox}
+            activityData={activityData}
+            evidenceData={evidenceData}
+          />
+
+          {approvalView?.visible && (
+            <ImperialApprovalPanel approval={approvalView} onReview={doReview} />
+          )}
 
           <GovernanceMap stages={stages} completedStageCount={completedStageCount} />
 
@@ -388,39 +635,82 @@ export default function TaskModal() {
             onResume={() => doTaskAction('resume', '恢复执行')}
             onReview={doReview}
             onAdvance={doAdvance}
+            showReviewActions={!approvalView?.visible}
           />
-
-          <SchedulerDiagnosisPanel
-            sched={sched}
-            stalledSec={stalledSec}
-            dispatchInfo={dInfo}
-            dispatchDiagnosis={dispatchDiagnosis}
-            runtimeSession={runtimeSession}
-            sessionTone={sessionTone}
-            sessionLabel={sessionLabel}
-            stageLine={stageLine}
-            expectedAgent={expectedAgent}
-            lastDispatchAgent={lastDispatchAgent}
-            taskOrg={task.org}
-            traceId={traceId}
-            outbox={outbox}
-            nextActionText={nextActionText}
-            canMutateSchedule={canMutateSchedule}
-            canRunDiagnosisAction={canRunDiagnosisAction}
-            schedActionFeedback={schedActionFeedback}
-            onSchedAction={doSchedAction}
-          />
-
-          <EvidenceChainSection data={evidenceData} />
 
           <TaskOutputSection group={activityData?.outputGroup} outputText={task.output} />
 
-          <CodingSessionSection
-            data={codingData}
-            onOpenSource={openSourcePreview}
-            onCreatePatch={createPatchReview}
-            onDecidePatch={decidePatchReview}
-          />
+          {todoTotal > 0 && (
+            <TodoSection todos={todos} todoDone={todoDone} todoTotal={todoTotal} />
+          )}
+
+          <TaskNotesSection task={task} />
+
+          <div className="diagnostic-shell activity-shell">
+            <button
+              type="button"
+              className="diagnostic-toggle"
+              aria-expanded={activityOpen}
+              onClick={() => setActivityOpen((value) => !value)}
+            >
+              <span>{activityLabel}</span>
+              <b>{activityData?.stateEvidence?.label || task.now || '等待进展'}</b>
+              <small>{activityMeta}</small>
+              <em>{activityOpen ? '收起' : '展开'}</em>
+            </button>
+            {activityOpen && (
+              <div className="diagnostic-stack">
+                <LiveActivitySection data={activityData} isDone={['Done', 'Cancelled'].includes(task.state)} logRef={logRef} />
+              </div>
+            )}
+          </div>
+
+          <div className={`diagnostic-shell ${diagnosticTone}`}>
+            <button
+              type="button"
+              className="diagnostic-toggle"
+              aria-expanded={diagnosticsOpen}
+              onClick={() => setDiagnosticsOpen((value) => !value)}
+            >
+              <span>更多证据</span>
+              <b>{diagnosticLabel}</b>
+              <small>{diagnosticMeta}</small>
+              <em>{diagnosticsOpen ? '收起' : '展开'}</em>
+            </button>
+            {diagnosticsOpen && (
+              <div className="diagnostic-stack">
+                <SchedulerDiagnosisPanel
+                  sched={sched}
+                  stalledSec={stalledSec}
+                  dispatchInfo={dInfo}
+                  dispatchDiagnosis={dispatchDiagnosis}
+                  runtimeSession={runtimeSession}
+                  sessionTone={sessionTone}
+                  sessionLabel={sessionLabel}
+                  stageLine={stageLine}
+                  expectedAgent={expectedAgent}
+                  lastDispatchAgent={lastDispatchAgent}
+                  taskOrg={task.org}
+                  traceId={traceId}
+                  outbox={outbox}
+                  nextActionText={nextActionText}
+                  canMutateSchedule={canMutateSchedule}
+                  canRunDiagnosisAction={canRunDiagnosisAction}
+                  schedActionFeedback={schedActionFeedback}
+                  onSchedAction={doSchedAction}
+                />
+
+                <EvidenceChainSection data={evidenceData} />
+
+                <CodingSessionSection
+                  data={codingData}
+                  onOpenSource={openSourcePreview}
+                  onCreatePatch={createPatchReview}
+                  onDecidePatch={decidePatchReview}
+                />
+              </div>
+            )}
+          </div>
 
           {sourcePreview && (
             <SourcePreviewPanel
@@ -429,16 +719,6 @@ export default function TaskModal() {
               onOpenEditor={openSourceInEditor}
             />
           )}
-
-          {/* Todo List */}
-          {todoTotal > 0 && (
-            <TodoSection todos={todos} todoDone={todoDone} todoTotal={todoTotal} />
-          )}
-
-          <TaskNotesSection task={task} />
-
-          {/* Live Activity */}
-          <LiveActivitySection data={activityData} isDone={['Done', 'Cancelled'].includes(task.state)} logRef={logRef} />
         </div>
       </div>
     </div>

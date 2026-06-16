@@ -78,6 +78,15 @@ const availabilityFallback: Record<string, string> = {
   unknown: '按任务连接',
 };
 
+const graphStatusLabel: Record<string, string> = {
+  ready: '就绪',
+  planned: '计划',
+  waiting: '等待',
+  blocked: '阻断',
+  required: '必需',
+  missing: '缺失',
+};
+
 const permissionFallback: Record<string, string> = {
   'agent.run': '调用 Agent',
   'workspace.read': '读工作区',
@@ -206,6 +215,9 @@ export default function CommandCenter() {
   const effectiveMode = (previewRun?.mode as RunMode | undefined) || (mode === 'auto' ? 'execute' : mode);
   const selectedMode = MODE_OPTIONS.find((item) => item.id === effectiveMode);
   const governance = previewRun?.governance || [];
+  const runGraph = previewRun?.runGraph;
+  const graphNodes = (runGraph?.nodes || []).slice(0, 8);
+  const graphSummary = runGraph?.summary;
   const targetDept = previewRun?.targetDept || '尚书省';
   const effectivePriority = (previewRun?.priority as PriorityMode | undefined) || (priority === 'auto' ? 'normal' : priority);
   const previewDeliverable = previewRun?.deliverable || '等待目标后自动生成';
@@ -636,6 +648,40 @@ export default function CommandCenter() {
               目标模式：{executionIsolation.targetMode}；当前约束：{executionIsolation.mode}
             </div>
           )}
+        </div>
+
+        <div className="cmd-preview-block">
+          <div className="cmd-block-title">执行图</div>
+          <div className="cmd-graph-summary">
+            <span className={`cmd-policy-state ${graphSummary?.blockedByPolicy ? 'review' : 'auto'}`}>
+              {graphSummary?.blockedByPolicy ? '等待释放' : '可推进'}
+            </span>
+            <small>
+              {graphSummary
+                ? `${graphSummary.nodeCount || 0} 节点 · ${graphSummary.edgeCount || 0} 边 · ${graphSummary.runtime || 'runtime'}`
+                : '等待目标后生成 RunGraph'}
+            </small>
+          </div>
+          <div className="cmd-run-graph">
+            {graphNodes.length ? graphNodes.map((node, index) => (
+              <div className={`cmd-graph-node ${node.status || 'planned'}`} key={node.id}>
+                <div className="cmd-graph-index">{index + 1}</div>
+                <div>
+                  <b>{node.label}</b>
+                  <span>{node.dept || node.kind}{node.detail ? ` · ${node.detail}` : ''}</span>
+                </div>
+                <em>{graphStatusLabel[node.status || ''] || node.status || node.kind}</em>
+              </div>
+            )) : (
+              <em className="cmd-empty-line">等待目标</em>
+            )}
+          </div>
+          {runGraph?.edges?.length ? (
+            <div className="cmd-policy-note muted">
+              连接关系：{runGraph.edges.slice(0, 3).map((edge) => edge.label || edge.condition || `${edge.from}→${edge.to}`).join(' / ')}
+              {runGraph.edges.length > 3 ? ` / +${runGraph.edges.length - 3}` : ''}
+            </div>
+          ) : null}
         </div>
 
         <div className="cmd-preview-block">

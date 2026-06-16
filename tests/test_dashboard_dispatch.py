@@ -188,7 +188,7 @@ def test_policy_gate_blocks_dispatch_before_outbox(monkeypatch, tmp_path):
     assert sched['policyGateDecision'] == 'hold_for_policy'
     assert 'shell.execute' in sched['lastDispatchError']
     assert not (data_dir / 'runtime_outbox.json').exists()
-    assert any('权限闸门拦截派发' in item['remark'] for item in updated['flow_log'])
+    assert any('权限闸门暂停交办' in item['remark'] for item in updated['flow_log'])
 
 
 def test_policy_gate_blocks_legacy_outbox_worker(monkeypatch, tmp_path):
@@ -258,7 +258,7 @@ def test_policy_gate_blocks_legacy_outbox_worker(monkeypatch, tmp_path):
     assert 'activeDispatchId' not in sched
     assert outbox['status'] == 'done'
     assert outbox['result']['blockedByPolicy'] is True
-    assert any('权限闸门拦截派发' in item['remark'] for item in updated['flow_log'])
+    assert any('权限闸门暂停交办' in item['remark'] for item in updated['flow_log'])
 
 
 def test_dispatch_skips_duplicate_unfinished_outbox(monkeypatch, tmp_path):
@@ -352,7 +352,8 @@ def test_dispatch_uses_opencode_run_attach(monkeypatch, tmp_path):
     monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
     monkeypatch.setattr(srv, '_check_gateway_alive', lambda: True)
     monkeypatch.setattr(srv, '_resolve_opencode_bin', lambda: '/usr/local/bin/opencode')
-    monkeypatch.setattr(srv, '_opencode_session_probe', lambda agent_id='taizi': True)
+    probe_dirs = []
+    monkeypatch.setattr(srv, '_opencode_session_probe', lambda agent_id='taizi', directory=None: probe_dirs.append(str(directory)) or True)
     monkeypatch.setattr(srv, '_opencode_session_error', lambda session_id: '')
     monkeypatch.setattr(
         srv,
@@ -403,6 +404,7 @@ def test_dispatch_uses_opencode_run_attach(monkeypatch, tmp_path):
     opencode_cmd = next(cmd for cmd in captured['cmds'] if cmd[:2] == ['/usr/local/bin/opencode', 'run'])
     assert opencode_cmd[opencode_cmd.index('--attach') + 1] == 'http://127.0.0.1:4096'
     assert opencode_cmd[opencode_cmd.index('--dir') + 1] == str(worktree_dir)
+    assert probe_dirs == [str(worktree_dir)]
     assert opencode_cmd[opencode_cmd.index('--agent') + 1] == 'taizi'
     assert '[trc_' in opencode_cmd[opencode_cmd.index('--title') + 1]
     assert captured['envs'][0]['EDICT_TASK_ID'] == task_id
@@ -453,12 +455,12 @@ def test_opencode_session_not_found_restarts_and_retries(monkeypatch, tmp_path):
     monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
     monkeypatch.setattr(srv, '_check_gateway_alive', lambda: True)
     monkeypatch.setattr(srv, '_resolve_opencode_bin', lambda: '/usr/local/bin/opencode')
-    monkeypatch.setattr(srv, '_opencode_session_probe', lambda agent_id='taizi': True)
+    monkeypatch.setattr(srv, '_opencode_session_probe', lambda agent_id='taizi', directory=None: True)
     monkeypatch.setattr(srv, '_opencode_session_error', lambda session_id: '')
     monkeypatch.setattr(srv, '_trigger_refresh', lambda: None)
 
     restarts = []
-    monkeypatch.setattr(srv, '_restart_opencode_server', lambda: restarts.append(True) or True)
+    monkeypatch.setattr(srv, '_restart_opencode_server', lambda directory=None: restarts.append(directory) or True)
 
     class ImmediateThread:
         def __init__(self, target=None, daemon=None):
@@ -490,7 +492,7 @@ def test_opencode_session_not_found_restarts_and_retries(monkeypatch, tmp_path):
     srv.dispatch_for_state(task_id, task, 'Taizi', trigger='imperial-edict')
 
     assert len(calls) == 2
-    assert restarts == [True]
+    assert restarts
     updated = json.loads(tasks_path.read_text(encoding='utf-8'))[0]
     assert updated['_scheduler']['lastDispatchStatus'] == 'success'
     assert updated['_scheduler']['lastDispatchSession'] == 'ses_ok'
@@ -519,11 +521,11 @@ def test_opencode_session_message_not_found_restarts_and_retries(monkeypatch, tm
     monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
     monkeypatch.setattr(srv, '_check_gateway_alive', lambda: True)
     monkeypatch.setattr(srv, '_resolve_opencode_bin', lambda: '/usr/local/bin/opencode')
-    monkeypatch.setattr(srv, '_opencode_session_probe', lambda agent_id='taizi': True)
+    monkeypatch.setattr(srv, '_opencode_session_probe', lambda agent_id='taizi', directory=None: True)
     monkeypatch.setattr(srv, '_trigger_refresh', lambda: None)
 
     restarts = []
-    monkeypatch.setattr(srv, '_restart_opencode_server', lambda: restarts.append(True) or True)
+    monkeypatch.setattr(srv, '_restart_opencode_server', lambda directory=None: restarts.append(directory) or True)
 
     session_errors = iter([
         'OpenCode session 结果读取失败: HTTP Error 404: Not Found',
@@ -558,7 +560,7 @@ def test_opencode_session_message_not_found_restarts_and_retries(monkeypatch, tm
     srv.dispatch_for_state(task_id, task, 'Taizi', trigger='imperial-edict')
 
     assert len(calls) == 2
-    assert restarts == [True]
+    assert restarts
     updated = json.loads(tasks_path.read_text(encoding='utf-8'))[0]
     assert updated['_scheduler']['lastDispatchStatus'] == 'success'
     assert updated['_scheduler']['lastDispatchSession'] == 'ses_ok'
@@ -587,14 +589,14 @@ def test_opencode_session_preflight_restarts_before_dispatch(monkeypatch, tmp_pa
     monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
     monkeypatch.setattr(srv, '_check_gateway_alive', lambda: True)
     monkeypatch.setattr(srv, '_resolve_opencode_bin', lambda: '/usr/local/bin/opencode')
-    monkeypatch.setattr(srv, '_opencode_session_probe', lambda agent_id='taizi': True)
+    monkeypatch.setattr(srv, '_opencode_session_probe', lambda agent_id='taizi', directory=None: True)
     monkeypatch.setattr(srv, '_opencode_session_error', lambda session_id: '')
     monkeypatch.setattr(srv, '_trigger_refresh', lambda: None)
 
     probes = []
-    monkeypatch.setattr(srv, '_opencode_session_probe', lambda agent_id='taizi': probes.append(agent_id) and len(probes) > 1)
+    monkeypatch.setattr(srv, '_opencode_session_probe', lambda agent_id='taizi', directory=None: probes.append((agent_id, directory)) and len(probes) > 1)
     restarts = []
-    monkeypatch.setattr(srv, '_restart_opencode_server', lambda: restarts.append(True) or True)
+    monkeypatch.setattr(srv, '_restart_opencode_server', lambda directory=None: restarts.append(directory) or True)
 
     class ImmediateThread:
         def __init__(self, target=None, daemon=None):
@@ -620,8 +622,8 @@ def test_opencode_session_preflight_restarts_before_dispatch(monkeypatch, tmp_pa
 
     srv.dispatch_for_state(task_id, task, 'Taizi', trigger='imperial-edict')
 
-    assert probes == ['taizi']
-    assert restarts == [True]
+    assert probes and probes[0][0] == 'taizi'
+    assert restarts
     assert len(calls) == 1
     updated = json.loads(tasks_path.read_text(encoding='utf-8'))[0]
     assert updated['_scheduler']['lastDispatchStatus'] == 'success'
@@ -651,7 +653,7 @@ def test_stale_dispatch_result_does_not_override_newer_progress(monkeypatch, tmp
     monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
     monkeypatch.setattr(srv, '_check_gateway_alive', lambda: True)
     monkeypatch.setattr(srv, '_resolve_opencode_bin', lambda: '/usr/local/bin/opencode')
-    monkeypatch.setattr(srv, '_opencode_session_probe', lambda agent_id='taizi': True)
+    monkeypatch.setattr(srv, '_opencode_session_probe', lambda agent_id='taizi', directory=None: True)
     monkeypatch.setattr(srv, '_opencode_session_error', lambda session_id: '')
     monkeypatch.setattr(srv, '_trigger_refresh', lambda: None)
 

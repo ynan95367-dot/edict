@@ -552,6 +552,9 @@ def cmd_state(task_id, new_state, now_text=None):
         t = find_task(tasks, task_id)
         if not t:
             log.error(f'任务 {task_id} 不存在')
+            rejected[0] = True
+            reject_reason[0] = '任务不存在'
+            done_payload[0] = {'oldState': '', 'newState': 'Review'}
             return tasks
         old_state[0] = t['state']
         if old_state[0] == new_state:

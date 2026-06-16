@@ -18,21 +18,24 @@ export const AGENT_LABELS: Record<string, string> = {
 export const NEXT_LABELS: Record<string, string> = {
   Taizi: '中书省起草',
   Zhongshu: '门下省审议',
-  Menxia: '尚书省派发',
+  Menxia: '尚书省交办执行',
   Assigned: '开始执行',
   Doing: '进入审查',
   Review: '完成',
 };
 
 export const DISPATCH_LABELS: Record<string, { label: string; tone: 'ok' | 'warn' | 'err' | 'idle' }> = {
-  queued: { label: '派发排队中', tone: 'warn' },
+  queued: { label: '等待交办执行', tone: 'warn' },
   progress: { label: 'Agent 已有进展', tone: 'ok' },
-  success: { label: '最近派发成功', tone: 'ok' },
+  success: { label: '执行请求已接收', tone: 'ok' },
   idle: { label: '等待调度', tone: 'idle' },
-  failed: { label: '派发失败', tone: 'err' },
-  timeout: { label: '派发超时', tone: 'err' },
-  error: { label: '派发异常', tone: 'err' },
-  'gateway-offline': { label: '运行时未启动', tone: 'err' },
+  failed: { label: '执行请求失败', tone: 'err' },
+  timeout: { label: '执行请求超时', tone: 'err' },
+  error: { label: '执行请求异常', tone: 'err' },
+  held: { label: '等待确认', tone: 'warn' },
+  'policy-held': { label: '等待权限审批', tone: 'warn' },
+  'worktree-failed': { label: '工作区失败', tone: 'err' },
+  'gateway-offline': { label: 'OpenCode 未连上', tone: 'err' },
   'openclaw-missing': { label: 'OpenClaw CLI 缺失', tone: 'err' },
   'opencode-missing': { label: 'OpenCode CLI 缺失', tone: 'err' },
   'opencode-session-stale': { label: 'OpenCode 会话失效', tone: 'warn' },
@@ -40,7 +43,7 @@ export const DISPATCH_LABELS: Record<string, { label: string; tone: 'ok' | 'warn
 
 export const SCHED_ACTION_LABELS: Record<string, string> = {
   scan: '立即扫描',
-  retry: '重试派发',
+  retry: '重新交办',
   escalate: '升级协调',
   rollback: '回滚',
 };
@@ -107,7 +110,7 @@ export function outboxLabel(outbox?: { pending?: number; running?: number; faile
   if (!outbox) return '空';
   const parts: string[] = [];
   if (outbox.running) parts.push(`执行${outbox.running}`);
-  if (outbox.pending) parts.push(`待发${outbox.pending}`);
+  if (outbox.pending) parts.push(`待办${outbox.pending}`);
   if (outbox.failed) parts.push(`失败${outbox.failed}`);
   return parts.join(' · ') || '空';
 }

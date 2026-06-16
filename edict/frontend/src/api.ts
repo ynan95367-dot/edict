@@ -36,12 +36,12 @@ export const api = {
   refreshModelRegistry: () =>
     postJ<ModelRegistryData>(`${API_BASE}/api/model-registry/refresh`, {}),
   runModelProbes: (payload: ModelProbeRequest = {}) =>
-    postJ<ActionResult & { started?: boolean; running?: boolean; count?: number; probes?: ModelProbeData }>(
+    postJ<ActionResult & { started?: boolean; running?: boolean; count?: number; scope?: string; probes?: ModelProbeData }>(
       `${API_BASE}/api/model-probes/run`,
       payload
     ),
   startModelProbes: (payload: ModelProbeRequest = {}) =>
-    postJ<ActionResult & { probes?: ModelProbeData }>(`${API_BASE}/api/model-probes/start`, payload),
+    postJ<ActionResult & { scope?: string; probes?: ModelProbeData }>(`${API_BASE}/api/model-probes/start`, payload),
   stopModelProbes: () =>
     postJ<ActionResult & { probes?: ModelProbeData }>(`${API_BASE}/api/model-probes/stop`, {}),
   addCustomModel: (payload: CustomModelPayload) =>
@@ -272,6 +272,53 @@ export interface GovernanceStage {
   label: string;
 }
 
+export interface RunGraphNode {
+  id: string;
+  kind: string;
+  label: string;
+  dept?: string;
+  status?: string;
+  order?: number;
+  detail?: string;
+  stage?: string;
+  decision?: string;
+  capabilityId?: string;
+  risk?: string;
+  requiresApproval?: boolean;
+  mode?: string;
+  targetMode?: string;
+  checkpoint?: string;
+  rollback?: string;
+}
+
+export interface RunGraphEdge {
+  id: string;
+  from: string;
+  to: string;
+  label?: string;
+  condition?: string;
+}
+
+export interface RunGraph {
+  version?: string;
+  entryNodeId?: string;
+  terminalNodeIds?: string[];
+  status?: string;
+  mode?: string;
+  riskLevel?: string;
+  runKind?: string;
+  summary?: {
+    nodeCount?: number;
+    edgeCount?: number;
+    blockedByPolicy?: boolean;
+    requiresApproval?: boolean;
+    runtime?: string;
+    isolationMode?: string;
+  };
+  nodes?: RunGraphNode[];
+  edges?: RunGraphEdge[];
+}
+
 export interface RunSpec {
   id: string;
   taskId: string;
@@ -300,6 +347,7 @@ export interface RunSpec {
   executionIsolation?: ExecutionIsolation;
   riskLevel: 'low' | 'medium' | 'high' | string;
   governance: GovernanceStage[];
+  runGraph?: RunGraph;
   constraints?: string;
   deliverable?: string;
   profile?: RunProfile;
@@ -456,7 +504,14 @@ export interface Task {
   updatedAt?: string;
   traceId?: string;
   trace_id?: string;
+  runSpec?: Partial<RunSpec>;
   sourceMeta?: Record<string, unknown>;
+  pending_confirm?: {
+    target_state?: string;
+    requested_by?: string;
+    requested_at?: string;
+    confirm_by?: string;
+  };
   activity?: ActivityEntry[];
   _prev_state?: string;
   _scheduler?: SchedulerInfo;
@@ -538,6 +593,9 @@ export interface ModelRegistryData {
   runtimeLabel?: string;
   generatedAt: string;
   refreshed?: boolean;
+  stale?: boolean;
+  cacheAgeSec?: number | null;
+  refreshRecommended?: boolean;
   sources: ModelRegistrySource[];
   summary: {
     total: number;
@@ -655,6 +713,11 @@ export interface ModelHealthAgent {
   lastTaskId?: string;
   lastDispatchId?: string;
   source?: string;
+  staleEvidence?: boolean;
+  historicalStatus?: string;
+  historicalStatusLabel?: string;
+  historicalLastError?: string;
+  historicalLastFailureAt?: string;
 }
 
 export interface ModelHealthData {
@@ -751,6 +814,18 @@ export interface RuntimeOutboxItem {
   result?: Record<string, unknown>;
 }
 
+export interface RuntimeOutboxLayer {
+  key: string;
+  label: string;
+  detail: string;
+  pending: number;
+  running: number;
+  failed: number;
+  total: number;
+  blockingLayer?: string;
+  items?: RuntimeOutboxItem[];
+}
+
 export interface RuntimeOutboxHealth {
   ok: boolean;
   checkedAt: string;
@@ -782,11 +857,13 @@ export interface RuntimeOutboxHealth {
     failed?: number;
     label?: string;
   };
+  layers?: Record<string, RuntimeOutboxLayer>;
   summary?: {
     tone?: 'ok' | 'warn' | 'err' | 'idle' | string;
     label?: string;
     detail?: string;
     nextAction?: string;
+    blockingLayer?: string;
   };
   latest?: RuntimeOutboxItem;
   activeItems: RuntimeOutboxItem[];
@@ -993,6 +1070,7 @@ export interface CodingSessionData {
   tests: CodingEvent[];
   outputs: CodingEvent[];
   events: CodingEvent[];
+  runSpec?: RunSpec;
   executionIsolation?: ExecutionIsolation;
   isolationHealth?: IsolationHealth;
   patchReviews?: PatchReview[];
@@ -1085,6 +1163,9 @@ export interface SchedulerInfo {
   lastDispatchTraceId?: string;
   lastDispatchRuntime?: string;
   lastDispatchSessionBoundAt?: string;
+  policyGateDecision?: string;
+  policyGateStatus?: string;
+  policyGateReason?: string;
   autoRollback?: boolean;
 }
 
@@ -1120,6 +1201,8 @@ export interface SchedulerStateData {
     actionLabel?: string;
     actionReason?: string;
     retryable?: boolean;
+    blockingLayer?: string;
+    cause?: string;
   };
 }
 

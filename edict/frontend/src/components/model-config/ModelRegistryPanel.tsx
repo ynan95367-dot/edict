@@ -58,6 +58,11 @@ export function ModelRegistryPanel({
   const observerRunning = Boolean(probe?.observerRunning);
   const probeShouldStop = probeRunning || probeEnabled;
   const probeQueueCount = probe?.queue?.length || 0;
+  const statuses = registry?.summary?.statuses || {};
+  const knownOk = statuses.ok || 0;
+  const knownProblem = (statuses.timeout || 0) + (statuses.failed || 0) + (statuses.degraded || 0) + (statuses.offline || 0);
+  const unknownCount = statuses.unknown || 0;
+  const staleText = registry?.stale ? ' · 缓存' : '';
 
   return (
     <div className="model-registry-panel">
@@ -65,7 +70,7 @@ export function ModelRegistryPanel({
         <div>
           <div className="sec-title">模型注册表</div>
           <div className="mr-sub">
-            OpenCode 实时模型 · 手动 API · 延迟观测统一入口
+            OpenCode 可选模型{staleText} · 当前 Agent 以模型健康面板为准
           </div>
         </div>
         <button className="btn btn-p mr-refresh" onClick={onRefreshRegistry} disabled={registryLoading}>
@@ -79,17 +84,22 @@ export function ModelRegistryPanel({
           <b>{registry?.summary?.total || models.length}</b>
         </div>
         <div className="mr-kpi">
-          <span>已观测延迟</span>
-          <b>{registry?.summary?.measured || 0}</b>
+          <span>已知可执行</span>
+          <b>{knownOk}</b>
         </div>
         <div className="mr-kpi">
-          <span>Provider</span>
-          <b>{Object.keys(registry?.summary?.providers || {}).length}</b>
+          <span>异常观测</span>
+          <b>{knownProblem}</b>
         </div>
         <div className="mr-kpi">
-          <span>最近同步</span>
-          <b>{registry?.generatedAt ? shortTime(registry.generatedAt) : '未同步'}</b>
+          <span>未观测</span>
+          <b>{unknownCount}</b>
         </div>
+      </div>
+
+      <div className="mr-guidance">
+        <b>模型能被 OpenCode 列出，不等于适合当前任务。</b>
+        <span>模型观测会调用 OpenCode，会占用会话；默认只观测当前 Agent 正在使用的模型。任务是否能继续，优先看上方“模型连接状态”和任务详情里的“当前判决”。</span>
       </div>
 
       <div className="mr-sources">
@@ -109,13 +119,13 @@ export function ModelRegistryPanel({
           <small>间隔 {formatInterval(probe?.config?.intervalSec)} · 已测 {probeSummary?.measured || registry?.summary?.measured || 0}</small>
         </div>
         <button className="btn btn-g" onClick={() => onRunProbe('visible')} disabled={!!probeLoading || !visibleRegistryModels.length}>
-          {probeLoading === 'visible' ? '启动中' : '观测当前列表'}
+          {probeLoading === 'visible' ? '启动中' : '观测当前筛选'}
         </button>
-        <button className="btn btn-g" onClick={() => onRunProbe('all')} disabled={!!probeLoading || !(registry?.summary?.total || models.length)}>
-          {probeLoading === 'all' ? '启动中' : '观测全部'}
+        <button className="btn btn-g mr-risk-action" onClick={() => onRunProbe('all')} disabled={!!probeLoading || !(registry?.summary?.total || models.length)}>
+          {probeLoading === 'all' ? '启动中' : '观测当前模型'}
         </button>
-        <button className={probeShouldStop ? 'btn btn-g' : 'btn btn-p'} onClick={onToggleContinuousProbe} disabled={!!probeLoading}>
-          {probeLoading === 'continuous' ? '切换中' : probeShouldStop ? '停止观测' : '开启持续观测'}
+        <button className={probeShouldStop ? 'btn btn-g' : 'btn btn-g mr-risk-action'} onClick={onToggleContinuousProbe} disabled={!!probeLoading}>
+          {probeLoading === 'continuous' ? '切换中' : probeShouldStop ? '停止观测' : '持续观测'}
         </button>
       </div>
 

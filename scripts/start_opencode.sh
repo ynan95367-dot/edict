@@ -159,6 +159,18 @@ stop_opencode_on_port() {
       kill "$pid" 2>/dev/null || true
     fi
   done
+  for _ in $(seq 1 15); do
+    pids=$(lsof -tiTCP:"$OPENCODE_PORT" -sTCP:LISTEN 2>/dev/null || true)
+    [[ -z "$pids" ]] && return 0
+    sleep 0.2
+  done
+  pids=$(lsof -tiTCP:"$OPENCODE_PORT" -sTCP:LISTEN 2>/dev/null || true)
+  for pid in $pids; do
+    cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
+    if [[ "$cmd" == *"opencode"* ]]; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done
   return 0
 }
 
@@ -291,11 +303,11 @@ echo -e "Model:    ${GREEN}${OPENCODE_MODEL}${NC}"
 echo -e "${GREEN}▶ 同步 OpenCode agent 配置...${NC}"
 "$PYTHON_BIN" "$REPO_DIR/scripts/sync_opencode_agents.py"
 
-if http_ok "${OPENCODE_SERVER_URL}/doc" && opencode_agents_ok && opencode_session_ok; then
+if opencode_agents_ok && opencode_session_ok; then
   write_opencode_pid_from_port
   echo -e "${GREEN}▶ 复用已运行的 OpenCode server: ${OPENCODE_SERVER_URL}${NC}"
 else
-  if http_ok "${OPENCODE_SERVER_URL}/doc"; then
+  if opencode_agents_ok; then
     echo -e "${YELLOW}⚠️  当前 ${OPENCODE_SERVER_URL} 的 OpenCode 会话探针未通过，正在切换...${NC}"
     stop_screen_session edict-opencode
     stop_opencode_on_port
@@ -306,10 +318,10 @@ else
   stop_screen_session edict-opencode
   start_opencode_server
   for _ in $(seq 1 20); do
-    http_ok "${OPENCODE_SERVER_URL}/doc" && break
+    opencode_agents_ok && break
     sleep 0.5
   done
-  if ! http_ok "${OPENCODE_SERVER_URL}/doc" || ! opencode_agents_ok || ! opencode_session_ok; then
+  if ! opencode_agents_ok || ! opencode_session_ok; then
     echo -e "${RED}OpenCode server 启动失败，请查看日志: ${OPENCODE_LOG}${NC}"
     exit 1
   fi

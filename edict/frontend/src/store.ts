@@ -24,7 +24,7 @@ export const PIPE = [
   { key: 'Taizi',    dept: '太子',   icon: '🤴', action: '分拣' },
   { key: 'Zhongshu', dept: '中书省', icon: '📜', action: '起草' },
   { key: 'Menxia',   dept: '门下省', icon: '🔍', action: '审议' },
-  { key: 'Assigned', dept: '尚书省', icon: '📮', action: '派发' },
+  { key: 'Assigned', dept: '尚书省', icon: '📮', action: '交办' },
   { key: 'Doing',    dept: '六部',   icon: '⚙️', action: '执行' },
   { key: 'Review',   dept: '尚书省', icon: '🔎', action: '汇总' },
   { key: 'Done',     dept: '回奏',   icon: '✅', action: '完成' },
@@ -32,7 +32,7 @@ export const PIPE = [
 
 export const PIPE_STATE_IDX: Record<string, number> = {
   Inbox: 0, Pending: 0, Taizi: 1, Zhongshu: 2, Menxia: 3,
-  Assigned: 4, Doing: 5, Review: 6, Done: 7, Blocked: 5, Cancelled: 5, Next: 4,
+  Assigned: 4, Doing: 5, Review: 6, PendingConfirm: 6, Done: 7, Blocked: 5, Cancelled: 5, Next: 4,
 };
 
 export const DEPT_COLOR: Record<string, string> = {
@@ -43,8 +43,8 @@ export const DEPT_COLOR: Record<string, string> = {
 
 export const STATE_LABEL: Record<string, string> = {
   Inbox: '收件', Pending: '待处理', Taizi: '太子分拣', Zhongshu: '中书起草',
-  Menxia: '门下审议', Assigned: '已派发', Doing: '执行中', Review: '待审查',
-  Done: '已完成', Blocked: '阻塞', Cancelled: '已取消', Next: '待执行',
+  Menxia: '门下审议', Assigned: '已交办', Doing: '执行中', Review: '待审查',
+  PendingConfirm: '待御批', Done: '已完成', Blocked: '阻塞', Cancelled: '已取消', Next: '待执行',
 };
 
 export function deptColor(d: string): string {

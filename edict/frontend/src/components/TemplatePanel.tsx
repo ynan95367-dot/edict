@@ -56,7 +56,7 @@ export default function TemplatePanel() {
         const startHint = st.gateway.runtime === 'opencode'
           ? '请运行 bash scripts/start_opencode.sh 或 bash edict.sh opencode'
           : '请先运行 openclaw gateway start';
-        toast(`⚠️ ${runtimeLabel} 未启动，任务将无法派发！${startHint}`, 'err');
+        toast(`⚠️ ${runtimeLabel} 未启动，任务将无法交办执行！${startHint}`, 'err');
         if (!confirm(`${runtimeLabel} 未启动，继续？`)) return;
       }
     } catch {

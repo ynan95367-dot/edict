@@ -30,6 +30,22 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── 工具函数 ──
 
+resolve_python() {
+  local candidate version major minor
+  for candidate in "${EDICT_PYTHON:-}" python3.14 python3.13 python3.12 python3.11 python3.10 python3; do
+    [[ -n "$candidate" ]] || continue
+    command -v "$candidate" &>/dev/null || continue
+    version=$("$candidate" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null) || continue
+    major=${version%%.*}
+    minor=${version#*.}
+    if [[ "$major" -gt 3 ]] || { [[ "$major" -eq 3 ]] && [[ "$minor" -ge 10 ]]; }; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 _ensure_dirs() {
   mkdir -p "$PIDDIR" "$LOGDIR" "$REPO_DIR/data"
   # 初始化必需的数据文件
@@ -103,10 +119,12 @@ _stop_project_opencode_runs() {
 do_start() {
   _ensure_dirs
 
-  if ! command -v python3 &>/dev/null; then
-    echo -e "${RED}❌ 未找到 python3，请先安装 Python 3.9+${NC}"
+  local PYTHON_BIN
+  PYTHON_BIN=$(resolve_python) || {
+    echo -e "${RED}❌ 未找到可用的 Python 3.10+（当前项目实际需要 3.10+）${NC}"
     exit 1
-  fi
+  }
+  export EDICT_PYTHON="$PYTHON_BIN"
 
   echo -e "${BLUE}╔══════════════════════════════════════════╗${NC}"
   echo -e "${BLUE}║  🏛️  三省六部 · 服务启动中               ║${NC}"
@@ -135,7 +153,7 @@ do_start() {
   # 启动数据刷新 watcher（后台）
   if ! _is_running "$WATCHER_PIDFILE"; then
     echo -e "${GREEN}▶ 启动数据刷新 watcher...${NC}"
-    nohup python3 "$REPO_DIR/scripts/refresh_watcher.py" \
+    nohup env EDICT_PYTHON="$PYTHON_BIN" "$PYTHON_BIN" "$REPO_DIR/scripts/refresh_watcher.py" \
       >> "$WATCHER_LOG" 2>&1 &
     echo $! > "$WATCHER_PIDFILE"
     echo -e "  PID=$(_get_pid "$WATCHER_PIDFILE")  日志: ${BLUE}$WATCHER_LOG${NC}"
@@ -156,7 +174,8 @@ do_start() {
   # 启动看板服务器（后台）
   if ! _is_running "$SERVER_PIDFILE"; then
     echo -e "${GREEN}▶ 启动看板服务器...${NC}"
-    nohup python3 "$REPO_DIR/dashboard/server.py" \
+    echo -e "  使用 Python: ${BLUE}${PYTHON_BIN}${NC} ($("$PYTHON_BIN" --version 2>&1))"
+    nohup env EDICT_PYTHON="$PYTHON_BIN" "$PYTHON_BIN" "$REPO_DIR/dashboard/server.py" \
       --host "$DASHBOARD_HOST" --port "$DASHBOARD_PORT" \
       >> "$SERVER_LOG" 2>&1 &
     echo $! > "$SERVER_PIDFILE"
@@ -229,6 +248,9 @@ do_status() {
   echo -e "${BLUE}🏛️  三省六部 · 服务状态${NC}"
   echo ""
 
+  local PYTHON_BIN=""
+  PYTHON_BIN=$(resolve_python 2>/dev/null || true)
+
   for label_pid in "看板服务器:$SERVER_PIDFILE" "数据刷新循环:$LOOP_PIDFILE" "刷新watcher:$WATCHER_PIDFILE" "OpenCode server:$OPENCODE_PIDFILE"; do
     local label="${label_pid%%:*}"
     local pidfile="${label_pid#*:}"
@@ -243,9 +265,9 @@ do_status() {
 
   echo ""
   # 如果看板在运行，尝试 healthz
-  if _is_running "$SERVER_PIDFILE"; then
+  if [[ -n "$PYTHON_BIN" ]] && _is_running "$SERVER_PIDFILE"; then
     local health
-    if health=$(python3 -c "
+    if health=$("$PYTHON_BIN" -c "
 import urllib.request, json, sys
 try:
     r = urllib.request.urlopen('http://${DASHBOARD_HOST}:${DASHBOARD_PORT}/healthz', timeout=3)
@@ -262,9 +284,9 @@ except Exception:
 	    fi
 	    echo -e "  看板地址: ${BLUE}http://${DASHBOARD_HOST}:${DASHBOARD_PORT}${NC}"
 	  fi
-  if command -v python3 &>/dev/null; then
+  if [[ -n "$PYTHON_BIN" ]]; then
     local opencode_health
-    opencode_health=$(python3 - "$OPENCODE_SERVER_URL" <<'PY' 2>/dev/null || true
+    opencode_health=$("$PYTHON_BIN" - "$OPENCODE_SERVER_URL" <<'PY' 2>/dev/null || true
 import sys, urllib.request
 try:
     r = urllib.request.urlopen(sys.argv[1].rstrip('/') + '/doc', timeout=2)

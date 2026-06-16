@@ -8,7 +8,7 @@ import {
   FolderArchive,
   RotateCcw,
 } from 'lucide-react';
-import type { RuntimeOutboxHealth, RuntimeOutboxItem } from '../../api';
+import type { RuntimeOutboxHealth, RuntimeOutboxItem, RuntimeOutboxLayer } from '../../api';
 
 type WorkerHealthPanelProps = {
   data: RuntimeOutboxHealth | null;
@@ -28,6 +28,15 @@ function toneClass(tone?: string): 'ok' | 'warn' | 'err' | 'idle' {
 
 function itemTitle(item: RuntimeOutboxItem): string {
   return item.taskTitle || item.trigger || item.kind || item.id;
+}
+
+function blockingLayerLabel(layer?: string): string {
+  if (layer === 'model') return '模型';
+  if (layer === 'runtime') return '运行时';
+  if (layer === 'workspace') return '工作区';
+  if (layer === 'history') return '历史';
+  if (layer === 'queue') return '队列';
+  return layer || '';
 }
 
 function QueueItem({
@@ -103,6 +112,13 @@ export function WorkerHealthPanel({
   const deadWindow = data?.deadLetterWindow;
   const deadReturned = deadWindow?.returned || deadLetters.length;
   const deadTotal = deadWindow?.total || data?.failed || 0;
+  const visibleDeadLetters = deadLetters.slice(0, 4);
+  const deadDisplayed = Math.min(visibleDeadLetters.length, deadReturned);
+  const deadClipped = Boolean(deadWindow?.truncated || deadLetters.length > visibleDeadLetters.length);
+  const layers = data?.layers || {};
+  const visibleLayers: RuntimeOutboxLayer[] = ['current', 'ghost', 'history']
+    .map((key) => layers[key])
+    .filter((layer): layer is RuntimeOutboxLayer => !!layer && layer.total > 0);
 
   return (
     <section className={`worker-health-panel ${tone}`}>
@@ -112,7 +128,7 @@ export function WorkerHealthPanel({
             {tone === 'err' ? <AlertTriangle size={15} /> : tone === 'warn' ? <Clock size={15} /> : <CheckCircle2 size={15} />}
             {summary?.label || 'Worker 读取中'}
           </span>
-          <p>{summary?.detail || '正在读取运行队列、worker 心跳和最近派发趋势。'}</p>
+          <p>{summary?.detail || '正在读取运行队列、worker 心跳和最近执行请求趋势。'}</p>
         </div>
         <div className="wh-head-actions">
           <button className="wh-scan" type="button" onClick={onScan}>
@@ -125,6 +141,22 @@ export function WorkerHealthPanel({
           )}
         </div>
       </div>
+
+      {!!visibleLayers.length && (
+        <div className="wh-layer-row">
+          {visibleLayers.map((layer) => {
+            const cause = blockingLayerLabel(layer.blockingLayer);
+            return (
+              <div key={layer.key} className={`wh-layer ${layer.key}`}>
+                <span>{layer.label}</span>
+                <b>{layer.pending}/{layer.running}/{layer.failed}</b>
+                <em>{layer.detail}</em>
+                {cause && <small>{cause}</small>}
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       <div className="wh-grid">
         <div className="wh-cell">
@@ -170,11 +202,11 @@ export function WorkerHealthPanel({
       {!!deadLetters.length && (
         <div className="wh-section">
           <div className="wh-section-title err">
-            <AlertTriangle size={14} />失败派发
-            {deadWindow?.truncated && <span>显示 {deadReturned}/{deadTotal}</span>}
+            <AlertTriangle size={14} />失败执行请求
+            {deadClipped && <span>显示 {deadDisplayed}/{deadTotal}</span>}
           </div>
           <div className="wh-list">
-            {deadLetters.map((item) => (
+            {visibleDeadLetters.map((item) => (
               <QueueItem
                 key={item.id}
                 item={item}

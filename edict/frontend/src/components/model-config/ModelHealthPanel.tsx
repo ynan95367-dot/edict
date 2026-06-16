@@ -27,7 +27,7 @@ export function ModelHealthPanel({
         <div>
           <div className="sec-title">模型连接状态</div>
           <div className="mh-sub">
-            {health?.runtimeLabel || '运行时'} 观测面板 · 基于真实派发、超时和 session 错误回写
+            {health?.runtimeLabel || '运行时'} 主判断 · 基于真实交办、超时和 session 错误回写
           </div>
         </div>
         <button className="btn btn-g" onClick={onRefresh} disabled={healthLoading}>
@@ -45,7 +45,7 @@ export function ModelHealthPanel({
         <div className="mh-stat failed"><span>失败/降级</span><b>{(summary.failed || 0) + (summary.degraded || 0)}</b></div>
         <div className="mh-stat unknown"><span>暂无观测</span><b>{summary.unknown || 0}</b></div>
         <div className={unhealthyCount ? 'mh-risk bad' : 'mh-risk'}>
-          <span>自动替换</span>
+          <span>历史换模</span>
           <b>{health?.failovers?.length || 0}</b>
         </div>
       </div>
@@ -63,6 +63,18 @@ export function ModelHealthPanel({
         {agentConfig.agents.map((ag) => {
           const h = healthByAgent[ag.id];
           const cls = statusClass(h?.status);
+          const evidenceAt = h?.lastFailureAt
+            ? shortTime(h.lastFailureAt)
+            : h?.lastSuccessAt
+              ? shortTime(h.lastSuccessAt)
+              : h?.historicalLastFailureAt
+                ? shortTime(h.historicalLastFailureAt)
+                : '无记录';
+          const evidenceTitle = h?.lastError || h?.historicalLastError || '';
+          const evidenceText = h?.lastError
+            || (h?.staleEvidence
+              ? `历史故障已过期：${h.historicalStatusLabel || STATUS_TEXT.unknown}，不影响当前判断`
+              : h?.source === 'config' ? '尚未发生执行观测' : '最近无错误');
           return (
             <div className="mh-row" key={ag.id}>
               <div className="mh-agent">
@@ -79,9 +91,9 @@ export function ModelHealthPanel({
               <div>
                 <span className={`mh-pill ${cls}`}>{h?.statusLabel || STATUS_TEXT.unknown}</span>
               </div>
-              <div className="mh-evidence">
-                <b>{h?.lastFailureAt ? shortTime(h.lastFailureAt) : h?.lastSuccessAt ? shortTime(h.lastSuccessAt) : '无记录'}</b>
-                <small title={h?.lastError || ''}>{h?.lastError || (h?.source === 'config' ? '尚未发生派发观测' : '最近无错误')}</small>
+              <div className={`mh-evidence ${h?.staleEvidence ? 'stale' : ''}`}>
+                <b>{evidenceAt}</b>
+                <small title={evidenceTitle}>{evidenceText}</small>
               </div>
               <div className="mh-fallback">
                 {h?.fallbackModel ? (

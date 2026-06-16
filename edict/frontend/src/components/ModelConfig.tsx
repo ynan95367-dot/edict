@@ -98,9 +98,11 @@ export default function ModelConfig() {
     const active = Boolean(probe?.running || probe?.observerRunning || probe?.config?.enabled);
     const timer = window.setInterval(async () => {
       await loadProbes();
-      await loadRegistry(false);
-      if (active) await loadHealth();
-    }, active ? 4000 : 15000);
+      if (active) {
+        await loadRegistry(false);
+        await loadHealth();
+      }
+    }, active ? 5000 : 20000);
     return () => window.clearInterval(timer);
   }, [probe?.running, probe?.observerRunning, probe?.config?.enabled]);
 
@@ -150,6 +152,18 @@ export default function ModelConfig() {
     return sortRegistryModels(items);
   }, [registry, modelQuery]);
 
+  const currentAgentModelIds = useMemo(() => {
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    agentConfig?.agents?.forEach((ag) => {
+      const id = (ag.model || ag.defaultModel || '').trim();
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      ids.push(id);
+    });
+    return ids;
+  }, [agentConfig]);
+
   if (!agentConfig?.agents) {
     return <div className="empty" style={{ gridColumn: '1/-1' }}>⚠️ 请先启动本地服务器</div>;
   }
@@ -163,7 +177,7 @@ export default function ModelConfig() {
   };
 
   const runProbe = async (mode: 'all' | 'visible') => {
-    const modelIds = mode === 'visible' ? visibleRegistryModels.map((m) => m.id) : [];
+    const modelIds = mode === 'visible' ? visibleRegistryModels.map((m) => m.id) : currentAgentModelIds;
     setProbeLoading(mode);
     try {
       const result = await api.runModelProbes({ modelIds, timeoutSec: 25 });
@@ -173,7 +187,7 @@ export default function ModelConfig() {
       }
       if (result.probes) setProbe(result.probes);
       await loadRegistry(false);
-      toast(result.started === false ? '模型观测已在运行' : `已开始观测 ${result.count || modelIds.length || registry?.summary?.total || models.length} 个模型`, 'ok');
+      toast(result.started === false ? '模型观测已在运行' : `已开始观测 ${result.count || modelIds.length} 个模型`, 'ok');
     } catch {
       setProbeError('无法启动模型观测');
     } finally {
@@ -188,7 +202,7 @@ export default function ModelConfig() {
       const result = probeShouldStop
         ? await api.stopModelProbes()
         : await api.startModelProbes({
-          modelIds: modelQuery.trim() ? visibleRegistryModels.map((m) => m.id) : [],
+          modelIds: modelQuery.trim() ? visibleRegistryModels.map((m) => m.id) : currentAgentModelIds,
           intervalSec: 300,
           timeoutSec: 25,
         });
@@ -255,7 +269,7 @@ export default function ModelConfig() {
       const result = await api.setDispatchChannel(channelSel);
       if (result.ok) {
         setChannelStatus('✅ 已保存');
-        toast('派发渠道已切换', 'ok');
+        toast('交办渠道已切换', 'ok');
         loadAgentConfig();
       } else {
         setChannelStatus(`❌ ${result.error || '失败'}`);

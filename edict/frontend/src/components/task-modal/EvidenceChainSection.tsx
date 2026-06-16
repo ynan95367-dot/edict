@@ -29,7 +29,7 @@ function outboxLabel(outbox?: { pending?: number; running?: number; failed?: num
   if (!outbox) return '空';
   const parts: string[] = [];
   if (outbox.running) parts.push(`执行${outbox.running}`);
-  if (outbox.pending) parts.push(`待发${outbox.pending}`);
+  if (outbox.pending) parts.push(`待办${outbox.pending}`);
   if (outbox.failed) parts.push(`失败${outbox.failed}`);
   return parts.join(' · ') || '空';
 }
@@ -42,7 +42,7 @@ function evidenceLaneLabel(lane?: string): string {
   const labels: Record<string, string> = {
     state: '状态',
     governance: '流转',
-    dispatch: '派发',
+    dispatch: '执行',
     session: '会话',
     tool: '工具',
     file: '文件',
@@ -67,7 +67,7 @@ export function EvidenceChainSection({ data }: { data: TaskEvidenceData | null }
         <div className="evidence-head">
           <div>
             <span className="run-title">证据链</span>
-            <p>正在合并任务、派发、OpenCode session、模型和工具证据。</p>
+            <p>正在合并任务、执行请求、OpenCode session、模型和工具证据。</p>
           </div>
           <span className="evidence-pill idle">读取中</span>
         </div>

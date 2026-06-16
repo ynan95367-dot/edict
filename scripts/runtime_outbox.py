@@ -98,13 +98,19 @@ def append_outbox_event(
             if _dedupe_key(existing) != item_key:
                 continue
             existing['updatedAt'] = created
-            if item.get('traceId') and not existing.get('traceId'):
+            if item.get('traceId') and item.get('traceId') != existing.get('traceId'):
+                previous_trace = existing.get('traceId') or ''
                 existing['traceId'] = item['traceId']
+            else:
+                previous_trace = ''
             if item.get('payload'):
                 existing['payload'] = item['payload']
             result = existing.get('result') if isinstance(existing.get('result'), dict) else {}
             result['duplicateSuppressedAt'] = created
             result['duplicateEventId'] = item['id']
+            if previous_trace:
+                result['previousTraceId'] = previous_trace
+                result['traceReboundAt'] = created
             existing['result'] = result
             item['id'] = existing.get('id') or item['id']
             item['deduped'] = True

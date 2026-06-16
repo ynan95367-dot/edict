@@ -347,7 +347,7 @@ bash edict.sh stop     # 停止
 
 </details>
 
-> 💡 **看板即开即用**：`server.py` 内嵌 `dashboard/dashboard.html`，Docker 镜像包含预构建的 React 前端
+> 💡 **看板即开即用**：`server.py` 直接提供 API 和 `dashboard/dist/` 中的 React 前端，Docker 镜像包含预构建产物。
 
 > 💡 详细教程请看 [Getting Started 指南](docs/getting-started.md)
 
@@ -452,11 +452,10 @@ edict/
 │   ├── libu_hr/                # 吏部 · 人事管理
 │   └── zaochao/SOUL.md         # 早朝官 · 情报枢纽
 ├── dashboard/
-│   ├── dashboard.html          # 军机处看板（单文件 · 零依赖 · ~2500 行）
 │   ├── dist/                   # React 前端构建产物（Docker 镜像内包含，本地可选）
 │   ├── auth.py                 # Dashboard 登录鉴权
 │   ├── court_discuss.py        # 朝堂议政（多官员 LLM 讨论引擎）
-│   └── server.py               # API 服务器（Python 标准库 · 零依赖 · ~2300 行）
+│   └── server.py               # API + React 静态资源服务器（Python 标准库）
 ├── edict/backend/              # 异步后端服务（SQLAlchemy + Redis）
 │   ├── app/models/
 │   │   ├── task.py             # 任务模型 + 状态机

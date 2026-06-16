@@ -9,6 +9,7 @@ type TaskActionsBarProps = {
   onResume: () => void;
   onReview: (action: 'approve' | 'reject') => void;
   onAdvance: () => void;
+  showReviewActions?: boolean;
 };
 
 export function TaskActionsBar({
@@ -20,8 +21,9 @@ export function TaskActionsBar({
   onResume,
   onReview,
   onAdvance,
+  showReviewActions = true,
 }: TaskActionsBarProps) {
-  const canReview = ['Review', 'Menxia'].includes(taskState);
+  const canReview = ['Review', 'Menxia', 'PendingConfirm'].includes(taskState);
   const canAdvance = ['Pending', 'Taizi', 'Zhongshu', 'Menxia', 'Assigned', 'Doing', 'Review', 'Next'].includes(taskState);
 
   return (
@@ -35,7 +37,7 @@ export function TaskActionsBar({
       {canResume && (
         <button className="btn-action btn-resume" onClick={onResume}><Play size={14} />恢复执行</button>
       )}
-      {canReview && (
+      {showReviewActions && canReview && (
         <>
           <button className="btn-action" style={{ background: '#2ecc8a22', color: '#2ecc8a', border: '1px solid #2ecc8a44' }} onClick={() => onReview('approve')}><CheckCircle2 size={14} />准奏</button>
           <button className="btn-action" style={{ background: '#ff527022', color: '#ff5270', border: '1px solid #ff527044' }} onClick={() => onReview('reject')}><XCircle size={14} />封驳</button>

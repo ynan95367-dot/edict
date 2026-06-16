@@ -23,24 +23,112 @@ const STATE_ORDER: Record<string, number> = {
 };
 
 const DISPATCH_STATUS: Record<string, { label: string; tone: 'ok' | 'warn' | 'err' | 'idle' }> = {
-  queued: { label: '派发排队', tone: 'warn' },
+  queued: { label: '等待执行请求', tone: 'warn' },
   progress: { label: '已有进展', tone: 'ok' },
-  success: { label: '派发成功', tone: 'ok' },
+  success: { label: '执行请求已接收', tone: 'ok' },
   idle: { label: '待调度', tone: 'idle' },
-  failed: { label: '派发失败', tone: 'err' },
-  timeout: { label: '派发超时', tone: 'err' },
-  error: { label: '派发异常', tone: 'err' },
+  failed: { label: '执行请求失败', tone: 'err' },
+  timeout: { label: '执行请求超时', tone: 'err' },
+  error: { label: '执行请求异常', tone: 'err' },
   'gateway-offline': { label: '运行时未启动', tone: 'err' },
   'openclaw-missing': { label: 'OpenClaw 缺失', tone: 'err' },
   'opencode-missing': { label: 'OpenCode 缺失', tone: 'err' },
   'opencode-session-stale': { label: 'OpenCode 会话失效', tone: 'warn' },
 };
 
+const GATE_RELEASED = new Set(['approved', 'released', 'bypassed']);
+
 function dispatchBadge(task: Task) {
   const sched = task._scheduler;
   const status = sched?.lastDispatchStatus || '';
   if (!status || ['success', 'progress', 'idle'].includes(status)) return null;
   return DISPATCH_STATUS[status] || { label: status, tone: 'warn' as const };
+}
+
+function compactLine(value?: string, fallback = '等待新的执行记录') {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return fallback;
+  return text.length > 96 ? `${text.slice(0, 96)}...` : text;
+}
+
+function policyGateWaiting(task: Task) {
+  const gate = task.runSpec?.policyGate;
+  if (!gate) return false;
+  const decision = String(gate.decision || '');
+  const status = String(gate.status || '');
+  return decision !== 'auto_dispatch' && !GATE_RELEASED.has(status);
+}
+
+function latestActionLine(task: Task) {
+  const latestActivity = (task.activity || []).slice().reverse().find((item) => ['progress', 'flow', 'todos', 'assistant', 'tool_result'].includes(item.kind));
+  if (latestActivity) {
+    if (latestActivity.kind === 'progress') return compactLine(latestActivity.text, '已回写进展');
+    if (latestActivity.kind === 'flow') return compactLine(`${latestActivity.from || '系统'} -> ${latestActivity.to || '下一阶段'}：${latestActivity.remark || '流程更新'}`);
+    if (latestActivity.kind === 'todos') return '执行计划已更新';
+    if (latestActivity.kind === 'tool_result') return latestActivity.exitCode && latestActivity.exitCode !== 0 ? '最近命令返回异常' : '最近命令已完成';
+    return compactLine(latestActivity.text || latestActivity.thinking, 'Agent 已记录动作');
+  }
+  const latestFlow = (task.flow_log || [])[task.flow_log?.length ? task.flow_log.length - 1 : -1];
+  if (latestFlow) return compactLine(`${latestFlow.from || '系统'} -> ${latestFlow.to || '下一阶段'}：${latestFlow.remark || '流程更新'}`);
+  return '暂无动作记录';
+}
+
+function cardNarrative(task: Task, curStage?: { dept: string; action: string }, dispatch?: { label: string; tone: 'ok' | 'warn' | 'err' | 'idle' } | null) {
+  const sched = task._scheduler || {};
+  const todos = task.todos || [];
+  const activeTodo = todos.find((todo) => todo.status === 'in-progress');
+  const doneTodos = todos.filter((todo) => todo.status === 'completed').length;
+  const isBlocked = task.state === 'Blocked' || (task.block && task.block !== '无' && task.block !== '-');
+  const policyWaiting = policyGateWaiting(task);
+  const activeDispatch = sched.lastDispatchStatus === 'queued' || sched.lastDispatchStatus === 'progress';
+  const tone: 'ok' | 'warn' | 'err' | 'idle' = isBlocked || dispatch?.tone === 'err'
+    ? 'err'
+    : policyWaiting || dispatch?.tone === 'warn' || activeDispatch
+      ? 'warn'
+      : task.state === 'Done'
+        ? 'ok'
+        : 'idle';
+
+  let now = activeTodo?.title || task.now || (curStage ? `${curStage.dept}正在${curStage.action}` : stateLabel(task));
+  let next = '继续观察 Agent 回写进展';
+  let why = dispatch?.label || (sched.lastDispatchStatus ? `交办状态：${sched.lastDispatchStatus}` : '当前没有失败执行请求');
+
+  if (policyWaiting) {
+    now = task.runSpec?.policyGate?.reason || '等待人工确认权限或风险边界';
+    next = '先处理皇上待决，再继续交办执行';
+    why = '权限闸门未释放';
+  } else if (isBlocked) {
+    now = task.block || task.now || '任务已阻塞';
+    next = '先看阻塞原因，再决定恢复、回滚或取消';
+    why = '阻塞需要人工判断';
+  } else if (dispatch?.tone === 'err') {
+    now = sched.lastDispatchError || task.now || dispatch.label;
+    next = '点开详情查看错误解释，可扫描、重新交办或升级协调';
+    why = dispatch.label;
+  } else if (task.state === 'Menxia') {
+    next = '审议方案：准奏进入执行，封驳退回修订';
+    why = '等待方案审议';
+  } else if (task.state === 'Review') {
+    next = '审查结果：通过则收口，驳回则返工';
+    why = '等待回奏审查';
+  } else if (task.state === 'Doing') {
+    next = activeTodo ? '等待当前子任务完成并回写进展' : '等待执行 Agent 更新计划或产物';
+    why = todos.length ? `子任务 ${doneTodos}/${todos.length}` : '执行阶段';
+  } else if (task.state === 'Done') {
+    next = '查看产物或归档沉淀';
+    why = '流程已收口';
+  } else if (activeDispatch) {
+    next = '等待目标 Agent 接收；超过阈值后扫描证据';
+    why = '执行请求处理中';
+  }
+
+  return {
+    tone,
+    now: compactLine(now),
+    next: compactLine(next),
+    why: compactLine(why),
+    last: latestActionLine(task),
+  };
 }
 
 function MiniPipe({ task }: { task: Task }) {
@@ -77,6 +165,7 @@ function EdictCard({ task }: { task: Task }) {
   const archived = isArchived(task);
   const isBlocked = task.block && task.block !== '无' && task.block !== '-';
   const dBadge = dispatchBadge(task);
+  const narrative = cardNarrative(task, curStage, dBadge);
 
   const handleAction = async (action: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -126,11 +215,20 @@ function EdictCard({ task }: { task: Task }) {
           </span>
         )}
       </div>
-      {task.now && task.now !== '-' && (
-        <div style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.5, marginBottom: 6 }}>
-          {task.now.substring(0, 80)}
+      <div className={`ec-narrative ${narrative.tone}`}>
+        <div className="ec-narr-row">
+          <span>现在</span>
+          <b>{narrative.now}</b>
         </div>
-      )}
+        <div className="ec-narr-row">
+          <span>下一步</span>
+          <b>{narrative.next}</b>
+        </div>
+        <div className="ec-narr-foot">
+          <span>{narrative.why}</span>
+          <em>{narrative.last}</em>
+        </div>
+      </div>
       {(task.review_round || 0) > 0 && (
         <div style={{ fontSize: 11, marginBottom: 6 }}>
           {Array.from({ length: task.review_round || 0 }, (_, i) => (
@@ -218,7 +316,7 @@ export default function EdictBoard() {
 
   const unArchivedDone = allEdicts.filter((t) => !t.archived && ['Done', 'Cancelled'].includes(t.state));
   const summaryCards = [
-    { key: 'active', label: '活跃旨意', value: activeEdicts.length, sub: `${routingEdicts.length} 道待派发`, tone: 'jade', icon: Gauge },
+    { key: 'active', label: '活跃旨意', value: activeEdicts.length, sub: `${routingEdicts.length} 道待交办`, tone: 'jade', icon: Gauge },
     { key: 'running', label: '执行/审查', value: runningEdicts.length, sub: '正在消化的任务', tone: 'gold', icon: Route },
     { key: 'blocked', label: '阻塞风险', value: blockedEdicts.length, sub: blockedEdicts.length ? '需要人工看一眼' : '目前干净', tone: blockedEdicts.length ? 'coral' : 'ok', icon: AlertTriangle },
     { key: 'archived', label: '归档沉淀', value: archivedEdicts.length, sub: `总计 ${allEdicts.length} 道`, tone: 'violet', icon: FolderArchive },
@@ -246,7 +344,7 @@ export default function EdictBoard() {
     try {
       const r = await api.runtimeOutboxRetry(itemId, 'dashboard dead-letter retry');
       if (r.ok) {
-        toast('失败派发已重新入队');
+        toast('失败执行请求已重新入队');
         loadAll();
       } else {
         toast(r.error || '重新入队失败', 'err');
@@ -260,7 +358,7 @@ export default function EdictBoard() {
     try {
       const r = await api.runtimeOutboxArchive({ itemId, reason: 'dashboard dead-letter archive' });
       if (r.ok) {
-        toast(r.message || '失败派发已归档');
+        toast(r.message || '失败执行请求已归档');
         loadAll();
       } else {
         toast(r.error || '归档失败', 'err');
@@ -271,11 +369,11 @@ export default function EdictBoard() {
   };
 
   const handleOutboxArchiveAll = async () => {
-    if (!confirm(`归档全部 ${runtimeOutbox?.failed || 0} 条失败派发？归档后不再显示在死信面板，但仍保留追溯记录。`)) return;
+    if (!confirm(`归档全部 ${runtimeOutbox?.failed || 0} 条失败执行请求？归档后不再显示在死信面板，但仍保留追溯记录。`)) return;
     try {
       const r = await api.runtimeOutboxArchive({ archiveAllFailed: true, reason: 'dashboard dead-letter archive all' });
       if (r.ok) {
-        toast(`已归档 ${r.count || 0} 条失败派发`);
+        toast(`已归档 ${r.count || 0} 条失败执行请求`);
         loadAll();
       } else {
         toast(r.error || '归档失败', 'err');

@@ -4,7 +4,7 @@
 Port: 7891 (可通过 --port 修改)
 
 Endpoints:
-  GET  /                       → dashboard.html
+  GET  /                       → React dashboard (dashboard/dist/index.html)
   GET  /api/live-status        → data/live_status.json
   GET  /api/agent-config       → data/agent_config.json
   POST /api/set-model          → {agentId, model}
@@ -122,6 +122,7 @@ from edict.control_plane import (
     STATE_AGENT_MAP as CONTROL_STATE_AGENT_MAP,
     STATE_FLOW as CONTROL_STATE_FLOW,
     STATE_LABELS as CONTROL_STATE_LABELS,
+    STATE_ORG_MAP as CONTROL_STATE_ORG_MAP,
     TERMINAL_STATES as CONTROL_TERMINAL_STATES,
     as_serializable_contract as control_plane_contract,
 )
@@ -2095,7 +2096,7 @@ def handle_create_task(title, org='中书省', official='中书令', priority='n
 
     if auto_dispatch:
         dispatch_for_state(task_id, new_task, 'Taizi', trigger='imperial-edict')
-        return {'ok': True, 'taskId': task_id, 'message': f'旨意 {task_id} 已下达，正在派发给太子'}
+        return {'ok': True, 'taskId': task_id, 'message': f'旨意 {task_id} 已下达，正在交给太子分拣'}
 
     return {'ok': True, 'taskId': task_id, 'message': f'旨意 {task_id} 已下达，等待人工推进'}
 
@@ -2208,7 +2209,7 @@ def _default_capabilities():
                 'id': 'runtime.openclaw',
                 'name': 'OpenClaw Runtime',
                 'category': 'runtime',
-                'description': '兼容 OpenClaw 风格的多 agent 派发和执行入口。',
+                'description': '兼容 OpenClaw 风格的多 agent 交办和执行入口。',
                 'adapters': ['openclaw'],
                 'risk': 'medium',
                 'enabled': True,
@@ -2503,6 +2504,56 @@ def _task_policy_gate(task):
     return gate if isinstance(gate, dict) else {}
 
 
+def _refresh_run_graph_for_spec(run_spec):
+    if not isinstance(run_spec, dict):
+        return {}
+    capability_ids = run_spec.get('requiredCapabilities') if isinstance(run_spec.get('requiredCapabilities'), list) else []
+    capability_policies = (
+        run_spec.get('capabilityPolicies')
+        if isinstance(run_spec.get('capabilityPolicies'), list)
+        else _capability_policies_for_run(capability_ids)
+    )
+    tool_policy = run_spec.get('toolPolicy') if isinstance(run_spec.get('toolPolicy'), dict) else _tool_policy_for_run(
+        capability_ids,
+        str(run_spec.get('riskLevel') or 'low'),
+        str(run_spec.get('mode') or 'execute'),
+        capability_policies,
+    )
+    policy_gate = run_spec.get('policyGate') if isinstance(run_spec.get('policyGate'), dict) else _policy_gate_for_run(
+        str(run_spec.get('mode') or 'execute'),
+        str(run_spec.get('riskLevel') or 'low'),
+        tool_policy,
+    )
+    execution_isolation = (
+        run_spec.get('executionIsolation')
+        if isinstance(run_spec.get('executionIsolation'), dict)
+        else _execution_isolation_for_run(
+            capability_ids,
+            str(run_spec.get('riskLevel') or 'low'),
+            str(run_spec.get('runKind') or 'general'),
+            str(run_spec.get('mode') or 'execute'),
+        )
+    )
+    governance = run_spec.get('governance') if isinstance(run_spec.get('governance'), list) else _governance_for_risk(
+        str(run_spec.get('riskLevel') or 'low'),
+        str(run_spec.get('mode') or 'execute'),
+    )
+    graph = _run_graph_for_spec(
+        mode=str(run_spec.get('mode') or 'execute'),
+        risk_level=str(run_spec.get('riskLevel') or 'low'),
+        run_kind=str(run_spec.get('runKind') or 'general'),
+        target_dept=str(run_spec.get('targetDept') or ''),
+        capability_ids=capability_ids,
+        capability_policies=capability_policies,
+        tool_policy=tool_policy,
+        policy_gate=policy_gate,
+        execution_isolation=execution_isolation,
+        governance=governance,
+    )
+    run_spec['runGraph'] = graph
+    return graph
+
+
 def _task_policy_gate_blocks_dispatch(task):
     gate = _task_policy_gate(task)
     decision = str(gate.get('decision') or '').strip()
@@ -2531,6 +2582,9 @@ def _release_task_policy_gate(task, actor='dashboard', comment=''):
     gate['approvedBy'] = actor
     gate['approvalComment'] = comment[:300] if comment else ''
     gate['releaseAction'] = ''
+    run_spec = _task_run_spec(task)
+    if isinstance(run_spec, dict):
+        _refresh_run_graph_for_spec(run_spec)
 
 
 def _execution_isolation_for_run(capability_ids, risk_level, run_kind, mode):
@@ -2855,7 +2909,7 @@ def _governance_for_risk(risk_level, mode='execute'):
         return common + [
             {'stage': 'clarify', 'dept': '门下省', 'label': '最小补充'},
             {'stage': 'confirm', 'dept': '皇上', 'label': '等待确认'},
-            {'stage': 'execute', 'dept': '尚书省', 'label': '确认后派发'},
+            {'stage': 'execute', 'dept': '尚书省', 'label': '确认后交办'},
             {'stage': 'verify', 'dept': '刑部', 'label': '结果校验'},
             {'stage': 'archive', 'dept': '史馆', 'label': '归档沉淀'},
         ]
@@ -2870,7 +2924,7 @@ def _governance_for_risk(risk_level, mode='execute'):
     if risk_level == 'medium':
         return common + [
             {'stage': 'review', 'dept': '门下省', 'label': '边界审议'},
-            {'stage': 'execute', 'dept': '尚书省', 'label': '派发执行'},
+            {'stage': 'execute', 'dept': '尚书省', 'label': '交办执行'},
             {'stage': 'verify', 'dept': '刑部', 'label': '结果校验'},
             {'stage': 'archive', 'dept': '史馆', 'label': '归档沉淀'},
         ]
@@ -2878,6 +2932,207 @@ def _governance_for_risk(risk_level, mode='execute'):
         {'stage': 'execute', 'dept': '尚书省', 'label': '直接调度'},
         {'stage': 'archive', 'dept': '史馆', 'label': '归档沉淀'},
     ]
+
+
+def _run_graph_for_spec(
+    *,
+    mode,
+    risk_level,
+    run_kind,
+    target_dept,
+    capability_ids,
+    capability_policies,
+    tool_policy,
+    policy_gate,
+    execution_isolation,
+    governance,
+):
+    """Build a small execution graph that IDE/UI clients can consume."""
+    capability_ids = [str(item) for item in (capability_ids or []) if str(item or '').strip()]
+    capability_policies = [item for item in (capability_policies or []) if isinstance(item, dict)]
+    tool_policy = tool_policy if isinstance(tool_policy, dict) else {}
+    policy_gate = policy_gate if isinstance(policy_gate, dict) else {}
+    execution_isolation = execution_isolation if isinstance(execution_isolation, dict) else {}
+    governance = [item for item in (governance or []) if isinstance(item, dict)]
+
+    decision = str(policy_gate.get('decision') or 'auto_dispatch')
+    gate_status = str(policy_gate.get('status') or '')
+    gate_blocks = decision != 'auto_dispatch' and gate_status not in {'approved', 'released', 'bypassed'}
+    nodes = []
+    edges = []
+    seen_nodes = set()
+    seen_edges = set()
+
+    def add_node(node_id, *, kind, label, dept='', status='planned', order=0, detail='', **extra):
+        node_id = str(node_id or '').strip()
+        if not node_id or node_id in seen_nodes:
+            return
+        seen_nodes.add(node_id)
+        node = {
+            'id': node_id,
+            'kind': kind,
+            'label': label,
+            'dept': dept,
+            'status': status,
+            'order': order,
+            'detail': detail,
+        }
+        node.update({k: v for k, v in extra.items() if v not in (None, '', [], {})})
+        nodes.append(node)
+
+    def add_edge(src, dst, *, label='', condition='always', edge_id=''):
+        src = str(src or '').strip()
+        dst = str(dst or '').strip()
+        if not src or not dst:
+            return
+        edge_id = edge_id or f'{src}->{dst}:{condition}:{label}'
+        if edge_id in seen_edges:
+            return
+        seen_edges.add(edge_id)
+        edges.append({
+            'id': edge_id,
+            'from': src,
+            'to': dst,
+            'label': label,
+            'condition': condition,
+        })
+
+    prev_id = ''
+    for index, stage in enumerate(governance):
+        stage_id = str(stage.get('stage') or f'stage-{index + 1}')
+        node_id = f'gov.{stage_id}'
+        status = 'waiting' if gate_blocks and stage_id in {'hold', 'approval', 'confirm', 'risk_review', 'review', 'clarify'} else 'planned'
+        if decision == 'auto_dispatch' and stage_id in {'execute', 'archive'}:
+            status = 'ready'
+        add_node(
+            node_id,
+            kind='governance',
+            label=stage.get('label') or stage_id,
+            dept=stage.get('dept') or '',
+            status=status,
+            order=index * 10,
+            detail=stage_id,
+            stage=stage_id,
+        )
+        if prev_id:
+            add_edge(prev_id, node_id, label='治理推进')
+        prev_id = node_id
+
+    graph_tail = prev_id
+    policy_status = 'blocked' if gate_blocks else 'ready'
+    add_node(
+        'policy.gate',
+        kind='policy',
+        label=policy_gate.get('label') or ('等待权限审批' if gate_blocks else '可自动分发'),
+        dept='门下省' if gate_blocks else '尚书省',
+        status=policy_status,
+        order=200,
+        detail=policy_gate.get('reason') or tool_policy.get('approvalReason') or '',
+        decision=decision,
+        releaseAction=policy_gate.get('releaseAction') or '',
+        permissions=tool_policy.get('permissions') if isinstance(tool_policy.get('permissions'), list) else [],
+    )
+    if graph_tail:
+        add_edge(graph_tail, 'policy.gate', label='权限闸门')
+
+    if gate_blocks:
+        add_node(
+            'control.wait',
+            kind='control',
+            label=policy_gate.get('label') or '等待人工处理',
+            dept='皇上',
+            status='waiting',
+            order=210,
+            detail=policy_gate.get('reason') or '',
+        )
+        add_edge('policy.gate', 'control.wait', label='等待释放', condition=decision)
+        graph_tail = 'control.wait'
+    else:
+        graph_tail = 'policy.gate'
+
+    add_node(
+        'isolation.prepare',
+        kind='isolation',
+        label=execution_isolation.get('label') or '执行隔离',
+        dept='尚书省',
+        status='required' if execution_isolation.get('required') else 'ready',
+        order=220,
+        detail=execution_isolation.get('reason') or '',
+        mode=execution_isolation.get('mode') or '',
+        targetMode=execution_isolation.get('targetMode') or '',
+        checkpoint=execution_isolation.get('checkpoint') or '',
+        rollback=execution_isolation.get('rollback') or '',
+        requiresPatchReview=bool(execution_isolation.get('requiresPatchReview')),
+    )
+    add_edge(graph_tail, 'isolation.prepare', label='执行准备', condition='policy_released' if gate_blocks else 'auto')
+
+    runtime_id = 'runtime.opencode' if 'runtime.opencode' in capability_ids else (
+        'runtime.openclaw' if 'runtime.openclaw' in capability_ids else 'runtime.adapter'
+    )
+    add_node(
+        runtime_id,
+        kind='runtime',
+        label='OpenCode Runtime' if runtime_id == 'runtime.opencode' else ('OpenClaw Runtime' if runtime_id == 'runtime.openclaw' else 'Runtime Adapter'),
+        dept=target_dept or '尚书省',
+        status='planned' if gate_blocks else 'ready',
+        order=230,
+        detail='执行层负责 session、工具调用、文件和命令事件。',
+        runKind=run_kind,
+    )
+    add_edge('isolation.prepare', runtime_id, label='交办')
+
+    capability_order = 240
+    for policy in capability_policies:
+        cap_id = str(policy.get('id') or '').strip()
+        if not cap_id or cap_id.startswith('runtime.') or cap_id in {'governance.plan', 'artifact.outputs'}:
+            continue
+        availability = policy.get('availability') if isinstance(policy.get('availability'), dict) else {}
+        status = 'missing' if availability.get('status') == 'missing' else ('planned' if gate_blocks else 'ready')
+        add_node(
+            f'capability.{cap_id}',
+            kind='capability',
+            label=policy.get('name') or cap_id,
+            dept=target_dept or '',
+            status=status,
+            order=capability_order,
+            detail=availability.get('reason') or policy.get('categoryLabel') or '',
+            capabilityId=cap_id,
+            risk=policy.get('risk') or '',
+            requiresApproval=bool(policy.get('requiresApproval')),
+        )
+        add_edge(runtime_id, f'capability.{cap_id}', label='调用能力')
+        capability_order += 10
+
+    add_node(
+        'artifact.outputs',
+        kind='artifact',
+        label='产物归档',
+        dept='史馆',
+        status='planned',
+        order=500,
+        detail='报告、补丁、截图、测试结果和输出文件按任务聚合。',
+    )
+    add_edge(runtime_id, 'artifact.outputs', label='沉淀证据')
+
+    return {
+        'version': 'run-graph-v1',
+        'entryNodeId': nodes[0]['id'] if nodes else '',
+        'terminalNodeIds': ['artifact.outputs'] if any(n.get('id') == 'artifact.outputs' for n in nodes) else [],
+        'status': 'waiting_policy' if gate_blocks else 'ready',
+        'mode': mode,
+        'riskLevel': risk_level,
+        'runKind': run_kind,
+        'summary': {
+            'nodeCount': len(nodes),
+            'edgeCount': len(edges),
+            'blockedByPolicy': bool(gate_blocks),
+            'requiresApproval': bool(policy_gate.get('requiresApproval') or tool_policy.get('requiresApproval')),
+            'runtime': runtime_id,
+            'isolationMode': execution_isolation.get('mode') or '',
+        },
+        'nodes': sorted(nodes, key=lambda item: (int(item.get('order') or 0), item.get('id', ''))),
+        'edges': edges,
+    }
 
 
 def _infer_run_kind(goal, capability_ids):
@@ -3069,7 +3324,7 @@ def _intent_auto_profile(goal, capability_ids, run_kind, mode, risk_level, targe
     ]
     object_rules = [
         ('模型配置', ['模型', 'opencode', 'open code', 'openclaw', 'provider', 'api key', '延迟']),
-        ('调度链路', ['派发', '调度', '太子', '任务', 'worker', '队列', 'trace', 'session']),
+        ('调度链路', ['交办', '调度', '太子', '任务', 'worker', '队列', 'trace', 'session']),
         ('界面体验', ['ui', 'ux', '页面', '面板', '颜色', '布局', '展示栏']),
         ('代码仓库', ['代码', '仓库', 'bug', '测试', '构建', 'commit', 'pr']),
         ('办公文档', ['ppt', 'word', 'excel', 'pdf', '文档', '表格', '幻灯片']),
@@ -3159,7 +3414,7 @@ def _prepare_run_spec(payload, run_id='RUN-PREVIEW', task_id='', created_at='', 
         mode = 'interactive'
         intent_reason = '目标还不够明确，先等待最小补充'
         clarification['safetyMode'] = 'interactive'
-        clarification['summary'] = '目标还可以再补一句，已切到边做边问，避免误派发'
+        clarification['summary'] = '目标还可以再补一句，已切到边做边问，避免误交办'
         deliverable = deliverable_input or _infer_deliverable(goal, run_kind, capability_ids, mode)
         constraints = constraints_input or _infer_constraints(goal, risk_level, mode)
     governance = _governance_for_risk(risk_level, mode)
@@ -3167,6 +3422,18 @@ def _prepare_run_spec(payload, run_id='RUN-PREVIEW', task_id='', created_at='', 
     tool_policy = _tool_policy_for_run(capability_ids, risk_level, mode, capability_policies)
     policy_gate = _policy_gate_for_run(mode, risk_level, tool_policy)
     execution_isolation = _execution_isolation_for_run(capability_ids, risk_level, run_kind, mode)
+    run_graph = _run_graph_for_spec(
+        mode=mode,
+        risk_level=risk_level,
+        run_kind=run_kind,
+        target_dept=target_dept,
+        capability_ids=capability_ids,
+        capability_policies=capability_policies,
+        tool_policy=tool_policy,
+        policy_gate=policy_gate,
+        execution_isolation=execution_isolation,
+        governance=governance,
+    )
     intent_profile = _intent_auto_profile(
         goal,
         capability_ids,
@@ -3218,6 +3485,7 @@ def _prepare_run_spec(payload, run_id='RUN-PREVIEW', task_id='', created_at='', 
         'executionIsolation': execution_isolation,
         'riskLevel': risk_level,
         'governance': governance,
+        'runGraph': run_graph,
         'constraints': constraints,
         'deliverable': deliverable,
         'profile': profile,
@@ -3253,6 +3521,7 @@ def create_run_spec(payload):
     tool_policy = run.get('toolPolicy') or {}
     policy_gate = run.get('policyGate') or _policy_gate_for_run(mode, risk_level, tool_policy)
     execution_isolation = run.get('executionIsolation') or _execution_isolation_for_run(capability_ids, risk_level, run_kind, mode)
+    run_graph = run.get('runGraph') or {}
     dispatch_policy = policy_gate.get('decision') or 'auto_dispatch'
     hold_for_gate = dispatch_policy != 'auto_dispatch'
 
@@ -3267,11 +3536,13 @@ def create_run_spec(payload):
         'requestedPriority': run.get('requestedPriority', 'auto'),
         'profile': profile,
         'requiredCapabilities': capability_ids,
+        'capabilityPolicies': run.get('capabilityPolicies') or [],
         'riskLevel': risk_level,
         'governance': governance,
         'toolPolicy': tool_policy,
         'policyGate': policy_gate,
         'executionIsolation': execution_isolation,
+        'runGraph': run_graph,
         'runKind': run_kind,
         'source': 'command_center',
     }
@@ -3302,13 +3573,13 @@ def create_run_spec(payload):
             if dispatch_policy == 'hold_for_clarification':
                 task['now'] = 'Interaction-first：RunSpec 已生成，等待最小补充或确认'
                 trigger = 'interaction-first'
-                first_remark = f'Interaction-first：目标已整理为 RunSpec {run_id}，但需要补充后再派发'
-                second_remark = 'RunSpec 等待最小补充，暂不自动派发执行'
+                first_remark = f'Interaction-first：目标已整理为 RunSpec {run_id}，但需要补充后再交办'
+                second_remark = 'RunSpec 等待最小补充，暂不自动交办执行'
             elif dispatch_policy == 'hold_for_review':
-                task['now'] = 'Plan-first：RunSpec 已生成，等待审议后再决定是否派发执行'
+                task['now'] = 'Plan-first：RunSpec 已生成，等待审议后再决定是否交办执行'
                 trigger = 'plan-first'
                 first_remark = f'Plan-first：目标已整理为 RunSpec {run_id}'
-                second_remark = 'RunSpec 进入审议，暂不自动派发执行'
+                second_remark = 'RunSpec 进入审议，暂不自动交办执行'
             else:
                 gate_reason = policy_gate.get('reason') or '执行前需要人工确认'
                 task['now'] = f'Policy Gate：{gate_reason}'
@@ -3348,11 +3619,15 @@ def create_run_spec(payload):
             'intentReason': intent_reason,
             'profile': profile,
             'riskLevel': risk_level,
+            'runKind': run_kind,
+            'targetDept': target_dept,
             'requiredCapabilities': capability_ids,
+            'capabilityPolicies': run.get('capabilityPolicies') or [],
             'governance': governance,
             'toolPolicy': tool_policy,
             'policyGate': policy_gate,
             'executionIsolation': execution_isolation,
+            'runGraph': run_graph,
         }
         meta = task.setdefault('sourceMeta', {})
         if isinstance(meta, dict):
@@ -3419,6 +3694,8 @@ def create_run_spec(payload):
                 'toolPolicy': tool_policy,
                 'policyGate': policy_gate,
                 'executionIsolation': execution_isolation,
+                'runGraph': run_graph,
+                'runGraphSummary': (run_graph.get('summary') if isinstance(run_graph, dict) else {}),
                 'dispatchPolicy': dispatch_policy,
             },
             evidence={'source': 'command_center'},
@@ -3440,41 +3717,80 @@ def handle_review_action(task_id, action, comment=''):
     task = next((t for t in tasks if t.get('id') == task_id), None)
     if not task:
         return {'ok': False, 'error': f'任务 {task_id} 不存在'}
-    if task.get('state') not in ('Review', 'Menxia'):
+    policy_blocked, policy_gate = _task_policy_gate_blocks_dispatch(task)
+    current_state = task.get('state')
+    if current_state not in ('Review', 'Menxia', 'PendingConfirm') and not policy_blocked:
         return {'ok': False, 'error': f'任务 {task_id} 当前状态为 {task.get("state")}，无法御批'}
 
     _ensure_scheduler(task)
     trace_id = _ensure_trace_id(task)
     _scheduler_snapshot(task, f'review-before-{action}')
+    from_dept = '门下省'
+    event_agent_id = 'menxia'
 
     if action == 'approve':
-        _release_task_policy_gate(task, actor='menxia', comment=comment)
+        _release_task_policy_gate(task, actor='menxia' if current_state in ('Menxia', 'Review') else 'huangshang', comment=comment)
         if task['state'] == 'Menxia':
             task['state'] = 'Assigned'
-            task['now'] = '门下省准奏，移交尚书省派发'
+            task['now'] = '门下省准奏，移交尚书省交办执行'
             remark = f'✅ 准奏：{comment or "门下省审议通过"}'
             to_dept = '尚书省'
+        elif task['state'] == 'PendingConfirm':
+            pending = task.get('pending_confirm') if isinstance(task.get('pending_confirm'), dict) else {}
+            target_state = str(pending.get('target_state') or 'Done')
+            if target_state == 'Done':
+                completed, total = _todo_progress(task)
+                if total > 0 and completed < total:
+                    return {'ok': False, 'error': f'子任务尚未全部完成（{completed}/{total}），不能直接准奏完结'}
+            task['state'] = target_state
+            task['org'] = _STATE_ORG_MAP.get(target_state, task.get('org', ''))
+            task.pop('pending_confirm', None)
+            target_label = _STATE_LABELS.get(target_state, target_state)
+            task['now'] = '御批通过，任务完成' if target_state == 'Done' else f'御批通过，进入{target_label}'
+            remark = f'✅ 御批确认：{comment or f"同意进入{target_label}"}'
+            to_dept = target_label
+            from_dept = '皇上'
+            event_agent_id = 'huangshang'
         else:  # Review
-            completed, total = _todo_progress(task)
-            if total > 0 and completed < total:
-                return {'ok': False, 'error': f'子任务尚未全部完成（{completed}/{total}），不能直接准奏完结'}
-            task['state'] = 'Done'
-            task['now'] = '御批通过，任务完成'
-            remark = f'✅ 御批准奏：{comment or "审查通过"}'
-            to_dept = '皇上'
+            if task['state'] == 'Review':
+                completed, total = _todo_progress(task)
+                if total > 0 and completed < total:
+                    return {'ok': False, 'error': f'子任务尚未全部完成（{completed}/{total}），不能直接准奏完结'}
+                task['state'] = 'Done'
+                task['now'] = '御批通过，任务完成'
+                remark = f'✅ 御批准奏：{comment or "审查通过"}'
+                to_dept = '皇上'
+                from_dept = '皇上'
+            else:
+                task['now'] = '权限闸门已准奏，继续交办执行'
+                remark = f'✅ 权限准奏：{comment or policy_gate.get("reason") or "同意按 RunSpec 执行"}'
+                to_dept = _STATE_LABELS.get(task.get('state'), task.get('state', '尚书省'))
+                from_dept = '皇上'
     elif action == 'reject':
-        round_num = (task.get('review_round') or 0) + 1
-        task['review_round'] = round_num
-        task['state'] = 'Zhongshu'
-        task['now'] = f'封驳退回中书省修订（第{round_num}轮）'
-        remark = f'🚫 封驳：{comment or "需要修改"}'
-        to_dept = '中书省'
+        if current_state == 'PendingConfirm':
+            task['state'] = 'Review'
+            task['org'] = _STATE_ORG_MAP.get('Review', task.get('org', ''))
+            task.pop('pending_confirm', None)
+            task['now'] = '御批驳回，退回尚书省复审'
+            remark = f'🚫 御批驳回：{comment or "需要复审"}'
+            to_dept = '尚书省'
+            from_dept = '皇上'
+            event_agent_id = 'huangshang'
+        else:
+            round_num = (task.get('review_round') or 0) + 1
+            task['review_round'] = round_num
+            task['state'] = 'Zhongshu'
+            task['now'] = f'封驳退回中书省修订（第{round_num}轮）'
+            remark = f'🚫 封驳：{comment or "需要修改"}'
+            to_dept = '中书省'
+            if policy_blocked and task.get('state') not in ('Menxia', 'Review'):
+                from_dept = '皇上'
     else:
         return {'ok': False, 'error': f'未知操作: {action}'}
 
     task.setdefault('flow_log', []).append({
         'at': now_iso(),
-        'from': '门下省' if task.get('state') != 'Done' else '皇上',
+        'from': from_dept,
         'to': to_dept,
         'remark': remark
     })
@@ -3491,12 +3807,12 @@ def handle_review_action(task_id, action, comment=''):
     _append_runtime_event(
         'governance_review_decided',
         task_id,
-        'menxia',
+        event_agent_id,
         {
             'action': action,
             'status': new_state,
             'comment': comment,
-            'from': '门下省',
+            'from': from_dept,
             'to': to_dept,
             'remark': remark,
             'reviewRound': task.get('review_round') or 0,
@@ -3508,23 +3824,23 @@ def handle_review_action(task_id, action, comment=''):
         _append_runtime_event(
             'task_done',
             task_id,
-            'menxia',
+            event_agent_id,
             {
                 'summary': comment or '审查通过',
                 'outputPath': task.get('output', ''),
                 'remark': remark,
-                'from': '门下省',
+                'from': from_dept,
                 'to': '皇上',
             },
             trace_id=trace_id,
         )
 
     # 🚀 审批后自动派发对应 Agent
-    if new_state not in ('Done',):
+    if new_state not in _TERMINAL_STATES:
         dispatch_for_state(task_id, task, new_state)
 
     label = '已准奏' if action == 'approve' else '已封驳'
-    dispatched = ' (已自动派发 Agent)' if new_state != 'Done' else ''
+    dispatched = ' (已自动交办 Agent)' if new_state not in _TERMINAL_STATES else ''
     return {'ok': True, 'message': f'{task_id} {label}{dispatched}'}
 
 
@@ -3559,6 +3875,14 @@ def _runtime_label():
 
 def _opencode_server_url():
     return os.environ.get('OPENCODE_SERVER_URL', 'http://127.0.0.1:4096').strip().rstrip('/')
+
+
+def _opencode_directory(directory=None):
+    """Return the OpenCode directory used for agent/session API calls."""
+    try:
+        return pathlib.Path(directory or PROJECT_ROOT).resolve()
+    except Exception:
+        return PROJECT_ROOT.resolve()
 
 
 def _opencode_model(agent_id=''):
@@ -4243,10 +4567,12 @@ def _latest_outbox_model_signal(agent_id, model_id=''):
         result = item.get('result') if isinstance(item.get('result'), dict) else {}
         error = item.get('error') or result.get('error') or ''
         if status == 'failed':
+            at = item.get('updatedAt') or item.get('createdAt') or ''
             return {
                 'status': _normalize_model_status(result.get('status') or status, error),
                 'lastError': _clean_runtime_error(error, limit=500),
-                'lastFailureAt': item.get('updatedAt') or item.get('createdAt') or '',
+                'lastFailureAt': at,
+                'updatedAt': at,
                 'lastTaskId': item.get('taskId') or '',
                 'lastDispatchId': item.get('id') or '',
                 'source': 'runtime_outbox',
@@ -4254,6 +4580,48 @@ def _latest_outbox_model_signal(agent_id, model_id=''):
         if status in {'done', 'running', 'pending'}:
             break
     return {}
+
+
+def _model_health_record_signal(rec):
+    if not isinstance(rec, dict):
+        return {}
+    status = rec.get('status') or 'unknown'
+    updated = rec.get('updatedAt') or rec.get('lastSuccessAt') or rec.get('lastFailureAt') or ''
+    latency = rec.get('lastLatencyMs')
+    if not isinstance(latency, (int, float)):
+        latency = rec.get('averageLatencyMs')
+    return {
+        'status': status,
+        'statusLabel': rec.get('statusLabel') or _model_status_label(status),
+        'updatedAt': updated,
+        'lastError': _clean_runtime_error(rec.get('lastError') or ''),
+        'lastFailureAt': rec.get('lastFailureAt') or '',
+        'lastSuccessAt': rec.get('lastSuccessAt') or '',
+        'lastLatencyMs': int(latency) if isinstance(latency, (int, float)) else None,
+        'averageLatencyMs': int(rec.get('averageLatencyMs')) if isinstance(rec.get('averageLatencyMs'), (int, float)) else None,
+        'latencyCount': int(rec.get('latencyCount') or 0),
+        'lastTaskId': rec.get('lastTaskId') or '',
+        'lastDispatchId': rec.get('lastDispatchId') or '',
+        'source': 'model_health',
+    }
+
+
+def _current_model_health_record_signal(rec):
+    signal = _model_health_record_signal(rec)
+    if not signal:
+        return {}, {}
+    status = _normalize_model_status(signal.get('status') or 'unknown', signal.get('lastError') or '')
+    if status in {'failed', 'timeout', 'degraded'}:
+        age = _iso_age(signal.get('lastFailureAt') or signal.get('updatedAt'))
+        if age is not None and age > _MODEL_FAILURE_COOLDOWN_SEC:
+            return {}, {
+                'staleEvidence': True,
+                'historicalStatus': status,
+                'historicalStatusLabel': _model_status_label(status),
+                'historicalLastError': signal.get('lastError') or '',
+                'historicalLastFailureAt': signal.get('lastFailureAt') or signal.get('updatedAt') or '',
+            }
+    return signal, {}
 
 
 def get_model_health():
@@ -4275,18 +4643,24 @@ def get_model_health():
         model_id = str(ag.get('model') or ag.get('defaultModel') or cfg.get('defaultModel') or '').strip()
         key = _model_health_key(agent_id, model_id)
         rec = records.get(key) if isinstance(records.get(key), dict) else {}
-        outbox_signal = {} if rec else _latest_outbox_model_signal(agent_id, model_id)
+        rec_signal, stale_history = _current_model_health_record_signal(rec)
+        outbox_signal = _latest_outbox_model_signal(agent_id, model_id)
         probe_signal = probe_latency.get(model_id) or {}
-        status = rec.get('status') or outbox_signal.get('status') or probe_signal.get('status') or 'unknown'
+        current_signal = _newer_model_signal(_newer_model_signal(rec_signal, outbox_signal), probe_signal)
+        status = current_signal.get('status') or 'unknown'
         if not gateway_alive:
             status = 'offline'
-        elif status in {'failed', 'timeout', 'degraded'}:
-            age = _iso_age(rec.get('lastFailureAt') or outbox_signal.get('lastFailureAt'))
-            if age is not None and age > _MODEL_FAILURE_COOLDOWN_SEC:
-                status = 'unknown'
         summary[status if status in summary else 'unknown'] += 1
         tier = _model_tier(model_id)
         fallback = _same_tier_fallback_model(agent_id, model_id, status) if model_id else ''
+        current_failure = status in {'failed', 'timeout', 'degraded', 'offline'}
+        current_success = status == 'ok'
+        last_latency = current_signal.get('lastLatencyMs')
+        if not isinstance(last_latency, (int, float)):
+            last_latency = current_signal.get('latencyMs')
+        public_source = current_signal.get('source') or 'config'
+        if public_source in {'continuous-probe', 'manual-probe', 'active-probe'} or str(public_source).endswith('-probe'):
+            public_source = 'model_probe'
         agents.append({
             'agentId': agent_id,
             'agentLabel': ag.get('label') or _agent_display_label(agent_id),
@@ -4299,20 +4673,21 @@ def get_model_health():
             'tierLabel': _model_tier_label(tier),
             'status': status,
             'statusLabel': _model_status_label(status),
-            'lastError': rec.get('lastError') or outbox_signal.get('lastError') or probe_signal.get('lastError') or '',
-            'lastFailureAt': rec.get('lastFailureAt') or outbox_signal.get('lastFailureAt') or (probe_signal.get('updatedAt') if status != 'ok' else '') or '',
-            'lastSuccessAt': rec.get('lastSuccessAt') or (probe_signal.get('updatedAt') if status == 'ok' else '') or '',
+            'lastError': _clean_runtime_error(current_signal.get('lastError') or '') if current_failure else '',
+            'lastFailureAt': (current_signal.get('lastFailureAt') or current_signal.get('updatedAt') or '') if current_failure else '',
+            'lastSuccessAt': (current_signal.get('lastSuccessAt') or current_signal.get('updatedAt') or '') if current_success else '',
             'failureCount': int(rec.get('failureCount') or (1 if outbox_signal else 0)),
             'timeoutCount': int(rec.get('timeoutCount') or 0),
             'successCount': int(rec.get('successCount') or 0),
-            'lastLatencyMs': rec.get('lastLatencyMs') if isinstance(rec.get('lastLatencyMs'), (int, float)) else probe_signal.get('latencyMs'),
-            'averageLatencyMs': rec.get('averageLatencyMs') if isinstance(rec.get('averageLatencyMs'), (int, float)) else probe_signal.get('averageLatencyMs'),
-            'latencyCount': int(rec.get('latencyCount') or probe_signal.get('latencyCount') or 0),
+            'lastLatencyMs': last_latency if isinstance(last_latency, (int, float)) else None,
+            'averageLatencyMs': current_signal.get('averageLatencyMs') if isinstance(current_signal.get('averageLatencyMs'), (int, float)) else None,
+            'latencyCount': int(current_signal.get('latencyCount') or 0),
             'fallbackModel': rec.get('fallbackModel') or fallback,
             'fallbackLabel': _model_label(rec.get('fallbackModel') or fallback, known) if (rec.get('fallbackModel') or fallback) else '',
-            'lastTaskId': rec.get('lastTaskId') or outbox_signal.get('lastTaskId') or '',
-            'lastDispatchId': rec.get('lastDispatchId') or outbox_signal.get('lastDispatchId') or '',
-            'source': 'model_health' if rec else (outbox_signal.get('source') or ('model_probe' if probe_signal else 'config')),
+            'lastTaskId': current_signal.get('lastTaskId') or '',
+            'lastDispatchId': current_signal.get('lastDispatchId') or '',
+            'source': public_source,
+            **stale_history,
         })
 
     return {
@@ -4447,7 +4822,7 @@ def _opencode_cli_model_entries(force=False):
             env=env,
             capture_output=True,
             text=True,
-            timeout=8,
+            timeout=4,
             check=False,
         )
     except Exception as exc:
@@ -4490,7 +4865,7 @@ def _opencode_provider_model_entries():
     entries = []
     try:
         req = Request(f'{_opencode_server_url()}/config/providers', headers={'Accept': 'application/json'})
-        data = json.loads(urlopen(req, timeout=5).read().decode('utf-8'))
+        data = json.loads(urlopen(req, timeout=3).read().decode('utf-8'))
     except Exception as exc:
         source.update({
             'latencyMs': int((time.perf_counter() - started) * 1000),
@@ -4544,6 +4919,7 @@ def _model_health_latency_snapshot(health=None):
     health = health or _read_model_health()
     records = health.get('records') if isinstance(health.get('records'), dict) else {}
     by_model = {}
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
     for rec in records.values():
         if not isinstance(rec, dict):
             continue
@@ -4551,6 +4927,9 @@ def _model_health_latency_snapshot(health=None):
         if not model_id:
             continue
         updated = str(rec.get('updatedAt') or rec.get('lastSuccessAt') or rec.get('lastFailureAt') or '')
+        age = _iso_age(updated, now_dt=now_dt)
+        if age is None or age > _MODEL_FAILURE_COOLDOWN_SEC:
+            continue
         current = by_model.get(model_id)
         if current and str(current.get('updatedAt') or '') >= updated:
             continue
@@ -4564,7 +4943,7 @@ def _model_health_latency_snapshot(health=None):
             'averageLatencyMs': int(rec.get('averageLatencyMs')) if isinstance(rec.get('averageLatencyMs'), (int, float)) else None,
             'latencyCount': int(rec.get('latencyCount') or 0),
             'updatedAt': updated,
-            'lastError': rec.get('lastError') or '',
+            'lastError': _clean_runtime_error(rec.get('lastError') or ''),
             'lastTaskId': rec.get('lastTaskId') or '',
             'lastDispatchId': rec.get('lastDispatchId') or '',
         }
@@ -4658,6 +5037,8 @@ def _model_probe_signal_from_record(rec):
 
 def _model_probe_latency_snapshot(state=None):
     state = state or _read_model_probe_state()
+    config = state.get('config') if isinstance(state.get('config'), dict) else {}
+    continuous_enabled = bool(config.get('enabled'))
     records = state.get('records') if isinstance(state.get('records'), dict) else {}
     by_model = {}
     for model_id, rec in records.items():
@@ -4666,6 +5047,8 @@ def _model_probe_latency_snapshot(state=None):
             continue
         signal = _model_probe_signal_from_record(rec)
         if signal:
+            if signal.get('source') == 'continuous-probe' and not continuous_enabled:
+                continue
             by_model[model_id] = signal
     return by_model
 
@@ -4688,21 +5071,36 @@ def _newer_model_signal(primary, secondary):
     return merged
 
 
-def _normalize_probe_model_ids(model_ids=None, registry=None, limit=160):
+def _current_agent_model_ids(limit=16):
+    ids = []
+    seen = set()
+    cfg = _agent_config()
+    for ag in _agent_config_agents(cfg):
+        model_id = str(ag.get('model') or ag.get('defaultModel') or cfg.get('defaultModel') or '').strip()
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        ids.append(model_id)
+        if len(ids) >= limit:
+            break
+    return ids
+
+
+def _normalize_probe_model_ids(model_ids=None, registry=None, limit=160, default_to_available=True, filter_available=True):
     registry = registry if isinstance(registry, dict) else get_model_registry(force=False)
     available = [
         str(item.get('id') or '').strip()
         for item in registry.get('models', []) if isinstance(item, dict) and item.get('id')
     ]
     available_set = set(available)
-    source = model_ids if isinstance(model_ids, list) and model_ids else available
+    source = model_ids if isinstance(model_ids, list) and model_ids else (available if default_to_available else [])
     normalized = []
     seen = set()
     for model_id in source:
         model_id = str(model_id or '').strip()
         if not model_id or model_id in seen:
             continue
-        if available_set and model_id not in available_set:
+        if filter_available and available_set and model_id not in available_set:
             continue
         seen.add(model_id)
         normalized.append(model_id)
@@ -4791,12 +5189,14 @@ def _record_model_probe(model_id, status, *, latency_ms=None, error='', source='
     updated = atomic_json_update(_model_probe_file(), _update, _empty_model_probe_state())
     _invalidate_model_registry_cache()
     rec = (updated.get('records') or {}).get(model_id, {}) if isinstance(updated, dict) else {}
-    failovers = _maybe_apply_probe_model_failovers(
-        model_id,
-        normalized,
-        rec.get('lastError') or error,
-        source=source,
-    )
+    failovers = []
+    if str(source or '') != 'continuous-probe':
+        failovers = _maybe_apply_probe_model_failovers(
+            model_id,
+            normalized,
+            rec.get('lastError') or error,
+            source=source,
+        )
     if failovers:
         rec = dict(rec)
         rec['autoFailovers'] = failovers
@@ -4952,7 +5352,15 @@ def _run_model_probe_batch(model_ids, *, timeout_sec=None, mode='manual'):
 
 def _start_model_probe_batch(model_ids=None, *, timeout_sec=None, mode='manual'):
     registry = get_model_registry(force=False)
-    normalized = _normalize_probe_model_ids(model_ids, registry=registry)
+    requested = model_ids if isinstance(model_ids, list) else []
+    default_ids = _current_agent_model_ids() if not requested else requested
+    normalized = _normalize_probe_model_ids(
+        default_ids,
+        registry=registry,
+        limit=24,
+        default_to_available=False,
+        filter_available=bool(requested),
+    )
     if not normalized:
         return {'ok': False, 'error': '没有可观测模型'}
     with _MODEL_PROBE_LOCK:
@@ -4967,7 +5375,8 @@ def _start_model_probe_batch(model_ids=None, *, timeout_sec=None, mode='manual')
         daemon=True,
     )
     thread.start()
-    return {'ok': True, 'started': True, 'running': True, 'count': len(normalized), 'probes': get_model_probes()}
+    scope = 'current-agent-models' if not requested else 'selected-models'
+    return {'ok': True, 'started': True, 'running': True, 'count': len(normalized), 'scope': scope, 'probes': get_model_probes()}
 
 
 def _model_probe_observer_loop():
@@ -5015,7 +5424,17 @@ def _resume_model_probe_observer_if_enabled(state=None):
 def start_model_probes(body=None):
     body = body if isinstance(body, dict) else {}
     registry = get_model_registry(force=False)
-    model_ids = _normalize_probe_model_ids(body.get('modelIds') if isinstance(body.get('modelIds'), list) else [], registry=registry)
+    requested = body.get('modelIds') if isinstance(body.get('modelIds'), list) else []
+    default_ids = _current_agent_model_ids() if not requested else requested
+    model_ids = _normalize_probe_model_ids(
+        default_ids,
+        registry=registry,
+        limit=24,
+        default_to_available=False,
+        filter_available=bool(requested),
+    )
+    if not model_ids:
+        return {'ok': False, 'error': '没有可观测模型'}
     interval_sec = _bounded_int(body.get('intervalSec'), _MODEL_PROBE_DEFAULT_INTERVAL_SEC, 30, 3600)
     timeout_sec = _bounded_int(body.get('timeoutSec'), _MODEL_PROBE_DEFAULT_TIMEOUT_SEC, 5, 120)
     at = now_iso()
@@ -5035,7 +5454,8 @@ def start_model_probes(body=None):
 
     atomic_json_update(_model_probe_file(), _update, _empty_model_probe_state())
     _ensure_model_probe_observer()
-    return {'ok': True, 'message': '持续观测已开启', 'probes': get_model_probes()}
+    scope = 'current-agent-models' if not requested else 'selected-models'
+    return {'ok': True, 'message': '持续观测已开启', 'scope': scope, 'probes': get_model_probes()}
 
 
 def stop_model_probes():
@@ -5072,9 +5492,17 @@ def get_model_probes():
         state = _set_model_probe_run_state(running=False, queue=[], current_model='', finished=True)
     observer_running = _model_probe_observer_alive()
     records = state.get('records') if isinstance(state.get('records'), dict) else {}
+    config = state.get('config') if isinstance(state.get('config'), dict) else {}
+    continuous_enabled = bool(config.get('enabled'))
+    current_records = {
+        model_id: rec
+        for model_id, rec in records.items()
+        if isinstance(rec, dict)
+        and not (rec.get('source') == 'continuous-probe' and not continuous_enabled)
+    }
     statuses = {'ok': 0, 'timeout': 0, 'failed': 0, 'degraded': 0, 'offline': 0, 'unknown': 0}
     measured = 0
-    for rec in records.values():
+    for rec in current_records.values():
         if not isinstance(rec, dict):
             continue
         status = rec.get('status') or 'unknown'
@@ -5082,7 +5510,7 @@ def get_model_probes():
         if isinstance(rec.get('latencyMs'), (int, float)):
             measured += 1
     recent = sorted(
-        [rec for rec in records.values() if isinstance(rec, dict)],
+        [rec for rec in current_records.values() if isinstance(rec, dict)],
         key=lambda rec: rec.get('updatedAt') or '',
         reverse=True,
     )[:80]
@@ -5095,14 +5523,14 @@ def get_model_probes():
         'queue': state.get('queue') if isinstance(state.get('queue'), list) else [],
         'lastStartedAt': state.get('lastStartedAt') or '',
         'lastFinishedAt': state.get('lastFinishedAt') or '',
-        'config': state.get('config') if isinstance(state.get('config'), dict) else {},
+        'config': config,
         'summary': {
-            'total': len(records),
+            'total': len(current_records),
             'measured': measured,
-            'unmeasured': max(0, len(records) - measured),
+            'unmeasured': max(0, len(current_records) - measured),
             'statuses': statuses,
         },
-        'records': records,
+        'records': current_records,
         'recent': recent,
     }
 
@@ -5162,12 +5590,20 @@ def _model_registry_summary(models, sources):
 
 
 def get_model_registry(force=False):
-    if not force:
-        cached = atomic_json_read(_model_registry_file(), {})
-        if isinstance(cached, dict) and cached.get('version') == 2 and isinstance(cached.get('models'), list):
-            age = _iso_age(cached.get('generatedAt'))
-            if age is not None and age < _MODEL_REGISTRY_CACHE_TTL_SEC:
-                return cached
+    cached = atomic_json_read(_model_registry_file(), {})
+    if not force and isinstance(cached, dict) and cached.get('version') == 2 and isinstance(cached.get('models'), list):
+        age = _iso_age(cached.get('generatedAt'))
+        if age is None or age < _MODEL_REGISTRY_CACHE_TTL_SEC:
+            cached['stale'] = False
+            cached['cacheAgeSec'] = age
+            return cached
+        # The model registry is advisory. Returning a stale list keeps the
+        # dashboard responsive; explicit sync still refreshes the live runtime.
+        cached = dict(cached)
+        cached['stale'] = True
+        cached['cacheAgeSec'] = age
+        cached['refreshRecommended'] = True
+        return cached
     if force:
         _sync_opencode_agent_config(force=True)
     cfg = get_agent_config_response(force=False)
@@ -5395,29 +5831,31 @@ def _resolve_opencode_bin():
     return shutil.which('opencode')
 
 
-def _check_opencode_probe():
-    """Probe the OpenCode headless server."""
-    base_url = _opencode_server_url()
-    basic_alive = False
-    for path in ('/doc', '/'):
-        try:
-            req = Request(f'{base_url}{path}', headers={'Accept': 'application/json'})
-            resp = urlopen(req, timeout=3)
-            if 200 <= resp.status < 500:
-                basic_alive = True
-                break
-        except Exception:
-            continue
-    if not basic_alive:
-        return False
-    if (BASE.parent / 'opencode.json').exists():
-        return {'taizi', 'zhongshu', 'shangshu'}.issubset(_opencode_agent_names())
-    return True
+def _check_opencode_probe(directory=None):
+    """Probe the OpenCode API path used by dispatch.
 
-
-def _opencode_agent_names():
+    OpenCode's docs/root pages can be slow while `/agent` is healthy, so do not
+    classify a usable runtime as offline just because `/doc` or `/` is sluggish.
+    """
+    directory = _opencode_directory(directory)
+    names = _opencode_agent_names(directory)
+    if (PROJECT_ROOT / 'opencode.json').exists():
+        return {'taizi', 'zhongshu', 'shangshu'}.issubset(names)
+    if names:
+        return True
     try:
-        query = urlencode({'directory': str(BASE.parent)})
+        parsed = urlparse(_opencode_server_url())
+        host = parsed.hostname or '127.0.0.1'
+        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except Exception:
+        return False
+
+
+def _opencode_agent_names(directory=None):
+    try:
+        query = urlencode({'directory': str(_opencode_directory(directory))})
         req = Request(f'{_opencode_server_url()}/agent?{query}', headers={'Accept': 'application/json'})
         data = json.loads(urlopen(req, timeout=3).read().decode('utf-8'))
         if isinstance(data, list):
@@ -5427,7 +5865,7 @@ def _opencode_agent_names():
     return set()
 
 
-def _opencode_session_probe(agent_id='taizi'):
+def _opencode_session_probe(agent_id='taizi', directory=None):
     """Verify that the OpenCode server can create/delete a session.
 
     `/doc` and `/agent` can stay healthy while the session registry is stale.
@@ -5435,8 +5873,9 @@ def _opencode_session_probe(agent_id='taizi'):
     dispatch spends retries on a broken server.
     """
     session_id = ''
+    directory = _opencode_directory(directory)
     try:
-        query = urlencode({'directory': str(BASE.parent)})
+        query = urlencode({'directory': str(directory)})
         body = json.dumps({
             'title': 'edict-session-probe',
             'agent': agent_id or 'taizi',
@@ -5456,7 +5895,7 @@ def _opencode_session_probe(agent_id='taizi'):
     finally:
         if session_id:
             try:
-                query = urlencode({'directory': str(BASE.parent)})
+                query = urlencode({'directory': str(directory)})
                 req = Request(
                     f'{_opencode_server_url()}/session/{quote(session_id)}?{query}',
                     method='DELETE',
@@ -5471,6 +5910,17 @@ def _clean_runtime_error(text, limit=500):
     cleaned = _ANSI_RE.sub('', str(text or ''))
     cleaned = ''.join(ch for ch in cleaned if ch == '\n' or ch == '\t' or ord(ch) >= 32)
     cleaned = cleaned.strip()
+    for old, new in (
+        ('重试派发', '重新交办'),
+        ('等待派发', '等待交办执行'),
+        ('已派发但未推进', '已交办但未推进'),
+        ('派发超时', '执行请求超时'),
+        ('派发失败', '执行请求失败'),
+        ('派发异常', '执行请求异常'),
+        ('派发前', '执行前'),
+        ('自动派发', '自动交办'),
+    ):
+        cleaned = cleaned.replace(old, new)
     return cleaned[:limit]
 
 
@@ -5620,7 +6070,7 @@ def _record_opencode_session_recovery(task_id, agent_id, trigger, dispatch_id, a
     }, confidence='medium', trace_id=trace_id)
 
 
-def _restart_opencode_server():
+def _restart_opencode_server(directory=None):
     """Restart the project OpenCode server after a stale session failure."""
     opencode_bin = _resolve_opencode_bin()
     if not opencode_bin:
@@ -5673,8 +6123,9 @@ def _restart_opencode_server():
             (pid_dir / 'opencode.pid').write_text(str(proc.pid), encoding='utf-8')
         except Exception:
             pass
+        probe_dir = _opencode_directory(directory)
         for _ in range(20):
-            if _check_opencode_probe() and _opencode_session_probe():
+            if _check_opencode_probe(probe_dir) and _opencode_session_probe(directory=probe_dir):
                 return True
             _time.sleep(0.5)
     except Exception as exc:
@@ -5683,8 +6134,8 @@ def _restart_opencode_server():
 
 
 def _opencode_config_has_agent(agent_id):
-    cfg_path = BASE.parent / 'opencode.json'
-    prompt_path = BASE.parent / '.opencode' / 'prompts' / f'{agent_id}.md'
+    cfg_path = PROJECT_ROOT / 'opencode.json'
+    prompt_path = PROJECT_ROOT / '.opencode' / 'prompts' / f'{agent_id}.md'
     if not cfg_path.exists() or not prompt_path.exists():
         return False
     try:
@@ -5697,7 +6148,7 @@ def _opencode_config_has_agent(agent_id):
 def _get_opencode_agent_session_status(agent_id):
     """Best-effort OpenCode session activity status."""
     try:
-        query = urlencode({'directory': str(BASE.parent)})
+        query = urlencode({'directory': str(_opencode_directory())})
         req = Request(f'{_opencode_server_url()}/session?{query}', headers={'Accept': 'application/json'})
         data = json.loads(urlopen(req, timeout=3).read().decode('utf-8'))
     except Exception:
@@ -5939,7 +6390,7 @@ def wake_agent(agent_id, message=''):
                 cmd = [
                     runtime_bin, 'run',
                     '--attach', _opencode_server_url(),
-                    '--dir', str(BASE.parent),
+                    '--dir', str(_opencode_directory()),
                     '--agent', runtime_id,
                     '--format', 'json',
                     '--title', f'wake-{runtime_id}',
@@ -6231,19 +6682,150 @@ def _runtime_outbox_trend(items, now_dt=None, window_sec=900):
     }
 
 
-def _runtime_outbox_summary(*, counts, worker, oldest_pending_age, oldest_running_age, trend):
+def _runtime_outbox_error_layer(item):
+    text = f"{item.get('lastError', '')} {item.get('result', '')}".lower()
+    if 'certificate verification' in text or 'unknown certificate' in text:
+        return 'model', '模型连接失败'
+    if 'timeout' in text or '超时' in text:
+        return 'model', '模型或执行超时'
+    if 'session not found' in text or 'opencode-session-stale' in text:
+        return 'runtime', 'OpenCode 会话失效'
+    if 'worktree' in text or 'patch' in text:
+        return 'workspace', '工作区准备失败'
+    return 'queue', '执行队列异常'
+
+
+def _runtime_outbox_error_priority(blocking_layer, detail):
+    if detail == '模型连接失败':
+        return 50
+    if blocking_layer == 'runtime':
+        return 40
+    if detail == '模型或执行超时':
+        return 30
+    if blocking_layer == 'workspace':
+        return 20
+    return 10
+
+
+def _runtime_outbox_item_layer(item, task_map):
+    task_id = str(item.get('taskId') or '')
+    status = str(item.get('status') or '')
+    task = task_map.get(task_id)
+    if not task:
+        if task_id and not task_id.startswith('JJC-'):
+            return 'ghost'
+        return 'history' if status == 'failed' else 'ghost'
+    if bool(task.get('archived')) or str(task.get('state') or '') in {'Done', 'Cancelled'}:
+        return 'history' if status == 'failed' else 'ghost'
+    return 'current'
+
+
+def _runtime_outbox_layers(items, task_map, now_dt):
+    buckets = {
+        'current': {
+            'key': 'current',
+            'label': '当前任务阻塞',
+            'detail': '当前任务相关执行请求。',
+            'pending': 0,
+            'running': 0,
+            'failed': 0,
+            'total': 0,
+            'blockingLayer': '',
+        },
+        'ghost': {
+            'key': 'ghost',
+            'label': '幽灵任务噪音',
+            'detail': '幽灵任务不存在或已不属于当前看板，可归档或等待 stale 回收。',
+            'pending': 0,
+            'running': 0,
+            'failed': 0,
+            'total': 0,
+            'blockingLayer': 'queue',
+        },
+        'history': {
+            'key': 'history',
+            'label': '历史失败',
+            'detail': '已完成、已取消或历史任务留下的失败记录，不应判定当前任务失败。',
+            'pending': 0,
+            'running': 0,
+            'failed': 0,
+            'total': 0,
+            'blockingLayer': '',
+        },
+        'unknown': {
+            'key': 'unknown',
+            'label': '未分类队列',
+            'detail': '缺少足够上下文的执行请求。',
+            'pending': 0,
+            'running': 0,
+            'failed': 0,
+            'total': 0,
+            'blockingLayer': 'queue',
+        },
+    }
+    examples = {key: [] for key in buckets}
+    for item in items:
+        status = str(item.get('status') or 'unknown')
+        if status not in {'pending', 'running', 'failed'}:
+            continue
+        layer_key = _runtime_outbox_item_layer(item, task_map)
+        if layer_key not in buckets:
+            layer_key = 'unknown'
+        bucket = buckets[layer_key]
+        bucket['total'] += 1
+        bucket[status] += 1
+        if status == 'failed':
+            blocking_layer, detail = _runtime_outbox_error_layer(item)
+            priority = _runtime_outbox_error_priority(blocking_layer, detail)
+            if layer_key == 'current' and priority > int(bucket.get('_detailPriority') or 0):
+                bucket['blockingLayer'] = blocking_layer
+                bucket['detail'] = detail
+                bucket['_detailPriority'] = priority
+        if len(examples[layer_key]) < 3:
+            examples[layer_key].append(_public_outbox_item(item, task_map, now_dt))
+    for key, bucket in buckets.items():
+        bucket.pop('_detailPriority', None)
+        bucket['items'] = examples[key]
+    return buckets
+
+
+def _runtime_outbox_summary(*, counts, worker, oldest_pending_age, oldest_running_age, trend, layers=None):
     pending = int(counts.get('pending') or 0)
     running = int(counts.get('running') or 0)
     failed = int(counts.get('failed') or 0)
     worker_active = bool(worker.get('active'))
     heartbeat_age = worker.get('heartbeatAgeSec')
     active_total = pending + running
+    layers = layers or {}
+    current = layers.get('current') or {}
+    ghost = layers.get('ghost') or {}
+    history = layers.get('history') or {}
+    current_failed = int(current.get('failed') or 0)
+    current_active = int(current.get('pending') or 0) + int(current.get('running') or 0)
+    if current_failed:
+        layer = current.get('blockingLayer') or 'queue'
+        return {
+            'tone': 'err',
+            'label': f'当前任务失败 {current_failed}',
+            'detail': f'{current.get("detail") or "当前任务有失败执行请求"}；幽灵任务 {ghost.get("total", 0)} 个，历史失败 {history.get("failed", 0)} 个。',
+            'nextAction': '先处理当前任务失败；幽灵任务可单独归档，不要混入当前判断。',
+            'blockingLayer': layer,
+        }
+    if failed and int(history.get('failed') or 0) == failed and not current_active:
+        return {
+            'tone': 'warn',
+            'label': '仅历史失败',
+            'detail': f'有 {failed} 个历史失败记录，但不会判定当前任务失败。',
+            'nextAction': '可以归档历史失败，继续观察当前任务。',
+            'blockingLayer': 'history',
+        }
     if failed:
         return {
             'tone': 'err',
             'label': f'失败 {failed}',
-            'detail': f'有 {failed} 个失败派发项，pending={pending} running={running}。',
+            'detail': f'有 {failed} 个失败执行请求，pending={pending} running={running}。',
             'nextAction': '先重试或归档失败项，再观察队列是否继续推进。',
+            'blockingLayer': 'queue',
         }
     if pending and not worker_active:
         return {
@@ -6292,13 +6874,13 @@ def _runtime_outbox_summary(*, counts, worker, oldest_pending_age, oldest_runnin
         return {
             'tone': 'warn',
             'label': '近期失败',
-            'detail': trend.get('label', '近期出现过失败派发。'),
+            'detail': trend.get('label', '近期出现过失败执行请求。'),
             'nextAction': '检查失败记录是否已经归档或重试。',
         }
     return {
         'tone': 'ok',
         'label': '队列清空',
-        'detail': '没有 pending/running/failed 派发项。',
+        'detail': '没有 pending/running/failed 执行请求。',
         'nextAction': '无需处理。',
     }
 
@@ -6372,6 +6954,7 @@ def get_runtime_outbox_health(limit=8):
     }
     trend = _runtime_outbox_trend(items, now_dt)
     task_map = {t.get('id', ''): t for t in load_tasks()}
+    layers = _runtime_outbox_layers(items, task_map, now_dt)
     failed_sorted = sorted(failed, key=lambda x: x.get('updatedAt') or x.get('createdAt') or '', reverse=True)
     active_sorted = sorted(unfinished, key=lambda x: x.get('createdAt') or x.get('updatedAt') or '')
     dead_letters = failed_sorted[:limit]
@@ -6392,12 +6975,14 @@ def get_runtime_outbox_health(limit=8):
         'oldestRunningAgeSec': oldest_running,
         'oldestRunningAgeText': _duration_text(oldest_running),
         'trend': trend,
+        'layers': layers,
         'summary': _runtime_outbox_summary(
             counts=counts,
             worker=worker,
             oldest_pending_age=oldest_pending,
             oldest_running_age=oldest_running,
             trend=trend,
+            layers=layers,
         ),
         'latest': _public_outbox_item(latest, task_map, now_dt) if latest else {},
         'activeItems': [_public_outbox_item(x, task_map, now_dt) for x in active_sorted[:limit]],
@@ -6422,7 +7007,7 @@ def handle_runtime_outbox_retry(item_id, reason=''):
         'kind': item.get('kind', ''),
         'trigger': item.get('trigger', ''),
         'reason': reason or 'manual retry from dashboard',
-        'remark': '失败派发已重新入队',
+        'remark': '失败执行请求已重新入队',
     }, trace_id=item.get('traceId', ''))
     _kick_dispatch_worker()
     return {'ok': True, 'message': '已重新入队', 'item': _public_outbox_item(item, {item.get('taskId', ''): next((t for t in load_tasks() if t.get('id') == item.get('taskId')), {})})}
@@ -6446,9 +7031,9 @@ def handle_runtime_outbox_archive(item_id='', archive_all_failed=False, task_id=
         'archiveAllFailed': bool(archive_all_failed),
         'count': count,
         'reason': reason or 'dashboard dead-letter archive',
-        'remark': f'已归档 {count} 条失败派发',
+        'remark': f'已归档 {count} 条失败执行请求',
     }, trace_id=first.get('traceId', ''))
-    return {'ok': True, 'message': f'已归档 {count} 条失败派发', 'count': count}
+    return {'ok': True, 'message': f'已归档 {count} 条失败执行请求', 'count': count}
 
 
 def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent=''):
@@ -6462,137 +7047,179 @@ def _dispatch_diagnosis(task, sched, outbox_summary, stalled_sec, expected_agent
     active_dispatch = bool(sched.get('activeDispatchId'))
     terminal = task.get('state') in _TERMINAL_STATES
 
+    def result(tone, label, detail, next_action, action='none', action_label='', action_reason='', retryable=False, layer='', cause=''):
+        return {
+            'tone': tone,
+            'label': label,
+            'detail': detail,
+            'nextAction': next_action,
+            'action': action,
+            'actionLabel': action_label,
+            'actionReason': action_reason,
+            'retryable': retryable,
+            'blockingLayer': layer,
+            'cause': cause,
+        }
+
     if terminal:
-        return {
-            'tone': 'ok',
-            'label': '流程已收口',
-            'detail': '任务已进入终态，不再自动派发。',
-            'nextAction': '查看执行回顾或输出文件',
-            'action': 'none',
-            'actionLabel': '',
-            'actionReason': '',
-            'retryable': False,
-        }
+        return result(
+            'ok',
+            '流程已收口',
+            '任务已进入终态，不再自动交办执行。',
+            '查看执行回顾或输出文件',
+            layer='flow',
+            cause='terminal-state',
+        )
     if sched.get('enabled') is False:
-        return {
-            'tone': 'idle',
-            'label': '调度已禁用',
-            'detail': '自动派发被关闭，平台不会继续推动当前任务。',
-            'nextAction': '需要继续时先恢复调度或手动推进',
-            'action': 'none',
-            'actionLabel': '',
-            'actionReason': '',
-            'retryable': False,
-        }
+        return result(
+            'idle',
+            '调度已禁用',
+            '自动交办被关闭，平台不会继续推动当前任务。',
+            '需要继续时先恢复调度或手动推进',
+            layer='scheduler',
+            cause='disabled',
+        )
+    if status == 'held':
+        gate_reason = sched.get('policyGateReason') or error or '任务正在等待审议或人工确认，尚未进入执行队列。'
+        return result(
+            'warn',
+            '等待人工确认',
+            gate_reason,
+            '先处理上方“皇上待决”或门下省审议，再继续交办执行',
+            layer='approval',
+            cause=sched.get('policyGateDecision') or 'held',
+        )
     if status == 'policy-held':
-        return {
-            'tone': 'warn',
-            'label': '等待权限审批',
-            'detail': error or 'RunSpec 权限闸门尚未释放，系统已暂停自动派发。',
-            'nextAction': '在门下省准奏或补充确认后再继续执行',
-            'action': 'none',
-            'actionLabel': '',
-            'actionReason': '',
-            'retryable': False,
-        }
+        return result(
+            'warn',
+            '等待权限审批',
+            error or 'RunSpec 权限闸门尚未释放，系统已暂停自动交办。',
+            '先处理上方“皇上待决”，准奏后系统会继续交办',
+            layer='approval',
+            cause=sched.get('policyGateDecision') or 'policy-gate',
+        )
+    if status == 'worktree-failed':
+        return result(
+            'err',
+            '工作区准备失败',
+            error or '专属 worktree 或隔离环境准备失败，执行请求没有发给 Agent。',
+            '修复工作区后重新交办；若无需隔离，可调整 RunSpec 后再试',
+            'retry',
+            '重新交办',
+            '诊断显示工作区准备失败，修复后重新交办',
+            True,
+            layer='workspace',
+            cause='worktree-allocation',
+        )
     if failed:
-        return {
-            'tone': 'err',
-            'label': '存在失败派发',
-            'detail': error or '运行时 outbox 中还有失败记录。',
-            'nextAction': '点击重试派发；确认无效后归档失败项',
-            'action': 'retry',
-            'actionLabel': '重试派发',
-            'actionReason': '诊断显示存在失败派发，按建议重新入队',
-            'retryable': True,
-        }
+        return result(
+            'err',
+            '存在失败执行请求',
+            error or '运行时 outbox 中还有失败记录。',
+            '点击重新交办；确认无效后归档失败项',
+            'retry',
+            '重新交办',
+            '诊断显示存在失败执行请求，按建议重新入队',
+            True,
+            layer='queue',
+            cause='failed-outbox',
+        )
     if status in {'gateway-offline', 'opencode-missing', 'openclaw-missing'}:
-        return {
-            'tone': 'err',
-            'label': '运行时不可用',
-            'detail': error or '派发所需运行时或 CLI 不可用。',
-            'nextAction': '先启动运行时或修复 CLI 配置，再重试派发',
-            'action': 'retry',
-            'actionLabel': '重试派发',
-            'actionReason': '诊断显示运行时不可用，修复后按建议重试派发',
-            'retryable': True,
-        }
+        return result(
+            'err',
+            '运行时不可用',
+            error or '执行所需运行时或 CLI 不可用。',
+            '先启动运行时或修复 CLI 配置，再重新交办',
+            'retry',
+            '重新交办',
+            '诊断显示运行时不可用，修复后按建议重新交办',
+            True,
+            layer='runtime',
+            cause=status,
+        )
     if status in {'failed', 'timeout', 'error'}:
-        return {
-            'tone': 'err',
-            'label': '最近派发失败',
-            'detail': error or '最近一次自动派发没有成功收口。',
-            'nextAction': '点击重试派发，必要时升级协调',
-            'action': 'retry',
-            'actionLabel': '重试派发',
-            'actionReason': '诊断显示最近派发失败，按建议重试',
-            'retryable': True,
-        }
+        layer = 'model' if _MODEL_CONNECTIVITY_RE.search(error or '') else 'runtime'
+        return result(
+            'err',
+            '最近执行请求失败',
+            error or '最近一次执行请求没有成功收口。',
+            '点击重新交办，必要时升级协调',
+            'retry',
+            '重新交办',
+            '诊断显示最近执行请求失败，按建议重试',
+            True,
+            layer=layer,
+            cause=status,
+        )
     if status == 'opencode-session-stale':
-        return {
-            'tone': 'warn',
-            'label': 'OpenCode 会话失效',
-            'detail': error or 'OpenCode session registry 曾失效，平台会尝试重启后重派。',
-            'nextAction': '等待自愈完成；若仍无进展，手动重试派发',
-            'action': 'retry',
-            'actionLabel': '重试派发',
-            'actionReason': '诊断显示 OpenCode 会话失效，按建议重试派发',
-            'retryable': True,
-        }
+        return result(
+            'warn',
+            'OpenCode 会话失效',
+            error or 'OpenCode session registry 曾失效，平台会尝试重启后重新交办。',
+            '等待自愈完成；若仍无进展，手动重新交办',
+            'retry',
+            '重新交办',
+            '诊断显示 OpenCode 会话失效，按建议重新交办',
+            True,
+            layer='runtime',
+            cause='session-stale',
+        )
     if active_dispatch or pending or running or status == 'queued':
-        return {
-            'tone': 'warn',
-            'label': '派发处理中',
-            'detail': f'队列 pending={pending} running={running}，等待运行时接收任务。',
-            'nextAction': '短暂等待；超过阈值后执行立即扫描或重试',
-            'action': 'scan',
-            'actionLabel': '立即扫描',
-            'actionReason': '诊断显示派发处理中，按建议扫描运行证据',
-            'retryable': False,
-        }
+        return result(
+            'warn',
+            '执行请求处理中',
+            f'队列 pending={pending} running={running}，等待运行时接收任务。',
+            '短暂等待；超过阈值后执行立即扫描或重试',
+            'scan',
+            '立即扫描',
+            '诊断显示执行请求处理中，按建议扫描运行证据',
+            False,
+            layer='queue',
+            cause='active-dispatch',
+        )
     if status in {'success', 'progress'}:
         if stalled_sec >= threshold:
-            return {
-                'tone': 'warn',
-                'label': '已派发但未推进',
-                'detail': f'最近派发已成功，但 {stalled_sec} 秒没有新进展。',
-                'nextAction': '先立即扫描；仍无证据再重试派发',
-                'action': 'scan',
-                'actionLabel': '立即扫描',
-                'actionReason': '诊断显示已派发但未推进，按建议扫描运行证据',
-                'retryable': True,
-            }
-        return {
-            'tone': 'ok',
-            'label': '派发正常',
-            'detail': '最近派发已被运行时接收，暂未发现阻塞。',
-            'nextAction': '等待 Agent 继续回写进展',
-            'action': 'none',
-            'actionLabel': '',
-            'actionReason': '',
-            'retryable': False,
-        }
+            return result(
+                'warn',
+                '已交办但未推进',
+                f'最近执行请求已被接收，但 {stalled_sec} 秒没有新进展。',
+                '先立即扫描；仍无证据再重新交办',
+                'scan',
+                '立即扫描',
+                '诊断显示已交办但未推进，按建议扫描运行证据',
+                True,
+                layer='agent',
+                cause='stalled-progress',
+            )
+        return result(
+            'ok',
+            '执行请求正常',
+            '最近执行请求已被运行时接收，暂未发现阻塞。',
+            '等待 Agent 继续回写进展',
+            layer='agent',
+            cause=status,
+        )
     if expected_agent:
-        return {
-            'tone': 'idle',
-            'label': '等待派发',
-            'detail': f'当前阶段预期由 {expected_label} 处理，尚无有效派发结果。',
-            'nextAction': '点击重试派发或手动推进',
-            'action': 'retry',
-            'actionLabel': '重试派发',
-            'actionReason': '诊断显示当前阶段尚无有效派发，按建议重试派发',
-            'retryable': True,
-        }
-    return {
-        'tone': 'idle',
-        'label': '无需派发',
-        'detail': '当前阶段没有匹配的自动派发 Agent。',
-        'nextAction': '查看流程或手动推进',
-        'action': 'none',
-        'actionLabel': '',
-        'actionReason': '',
-        'retryable': False,
-    }
+        return result(
+            'idle',
+            '等待交办执行',
+            f'当前阶段预期由 {expected_label} 处理，尚无有效执行结果。',
+            '点击重新交办或手动推进',
+            'retry',
+            '重新交办',
+            '诊断显示当前阶段尚无有效执行结果，按建议重新交办',
+            True,
+            layer='scheduler',
+            cause='not-dispatched',
+        )
+    return result(
+        'idle',
+        '无需交办',
+        '当前阶段没有匹配的自动执行 Agent。',
+        '查看流程或手动推进',
+        layer='flow',
+        cause='no-agent',
+    )
 
 
 def get_scheduler_state(task_id):
@@ -6655,7 +7282,7 @@ def handle_scheduler_retry(task_id, reason=''):
     modify_task(task_id, _apply)
 
     dispatch_for_state(task_id, task, result['state'], trigger='taizi-retry')
-    return {'ok': True, 'message': f'{task_id} 已触发重试派发', 'retryCount': result['retryCount']}
+    return {'ok': True, 'message': f'{task_id} 已触发重新交办', 'retryCount': result['retryCount']}
 
 
 def handle_scheduler_escalate(task_id, reason=''):
@@ -6783,7 +7410,7 @@ def handle_scheduler_scan(threshold_sec=600):
                 sched['lastDispatchTrigger'] = 'state-handoff-scan'
                 _scheduler_add_flow(
                     task,
-                    f'检测到状态移交未派发，准备派发 {state} → {expected_agent}',
+                    f'检测到状态移交未交办，准备交办 {state} → {expected_agent}',
                     to=_STATE_LABELS.get(state, state),
                 )
                 pending_handoffs.append((task_id, state))
@@ -8388,7 +9015,7 @@ def _task_isolation_health(isolation, checkpoint, patch_reviews):
         status = 'err'
         label = '专属 Worktree 未分配'
         detail = '该任务要求 dedicated worktree，但当前任务尚未记录 worktreePath。'
-        next_action = '重试派发前先完成 worktree 分配；若反复失败，检查 git worktree 权限。'
+        next_action = '重新交办前先完成 worktree 分配；若反复失败，检查 git worktree 权限。'
     elif worktree_path and not checkpoint_ok:
         status = 'err'
         label = 'Checkpoint 不可用'
@@ -8623,6 +9250,15 @@ def get_task_coding_session(task_id):
     checkpoint = get_worktree_checkpoint(root=patch_root)
     patch_reviews = [_patch_review_public(item) for item in list_patch_reviews(task_id)]
     isolation_health = _task_isolation_health(execution_isolation, checkpoint, patch_reviews)
+    run_spec = task.get('runSpec') if isinstance(task.get('runSpec'), dict) else {}
+    run_spec_public = {}
+    if run_spec:
+        try:
+            run_spec_public = json.loads(json.dumps(run_spec, ensure_ascii=False))
+        except Exception:
+            run_spec_public = dict(run_spec)
+        if not isinstance(run_spec_public.get('runGraph'), dict):
+            _refresh_run_graph_for_spec(run_spec_public)
     patch_counts = {}
     for review in patch_reviews:
         status = review.get('status', 'unknown')
@@ -8664,6 +9300,7 @@ def get_task_coding_session(task_id):
         'tests': tests[-20:],
         'outputs': outputs,
         'events': events[-120:],
+        'runSpec': run_spec_public,
         'executionIsolation': execution_isolation,
         'isolationHealth': isolation_health,
         'patchReviews': patch_reviews[-20:],
@@ -9244,7 +9881,7 @@ def get_task_evidence(task_id):
         _evidence_add(
             timeline,
             lane='dispatch',
-            title=f"{_agent_display_label(item.get('agentId')) or item.get('agentId') or 'Agent'} 派发 {item.get('status')}",
+            title=f"{_agent_display_label(item.get('agentId')) or item.get('agentId') or 'Agent'} 执行请求 {item.get('status')}",
             detail=' · '.join(detail_parts),
             at=_evidence_time(item, 'updatedAt', 'createdAt'),
             status=item.get('status'),
@@ -9402,6 +10039,7 @@ def get_task_evidence(task_id):
 # 状态推进顺序（手动推进用，来自共享控制面契约）
 _STATE_FLOW = dict(CONTROL_STATE_FLOW)
 _STATE_LABELS = dict(CONTROL_STATE_LABELS)
+_STATE_ORG_MAP = dict(CONTROL_STATE_ORG_MAP)
 
 
 def _build_dispatch_payload(task_id, task, new_state, agent_id, trigger):
@@ -9434,7 +10072,7 @@ def _build_dispatch_payload(task_id, task, new_state, agent_id, trigger):
             f'旨意: {title}\n'
             f'⚠️ 看板已有此任务记录，请勿重复创建。直接用 kanban_update.py state 更新状态。\n'
             f'如需任务详情，先执行：python3 scripts/kanban_update.py show {task_id}；不要猜测单任务 JSON 路径。\n'
-            f'请立即起草执行方案，走完完整三省流程（中书起草→门下审议→尚书派发→六部执行）。'
+            f'请立即起草执行方案，走完完整三省流程（中书起草→门下审议→尚书交办→六部执行）。'
             f'{isolation_text}'
         ),
         'menxia': (
@@ -9448,16 +10086,16 @@ def _build_dispatch_payload(task_id, task, new_state, agent_id, trigger):
             f'{isolation_text}'
         ),
         'shangshu': (
-            f'📮 门下省已准奏，请派发执行\n'
+            f'📮 门下省已准奏，请交办执行\n'
             f'任务ID: {task_id}\n'
             f'Trace: {trace_id}\n'
             f'旨意: {title}\n'
-            f'{"建议派发部门: " + target_dept if target_dept else ""}\n'
+            f'{"建议交办部门: " + target_dept if target_dept else ""}\n'
             f'⚠️ 看板已有此任务，请勿重复创建。\n'
             f'如需任务详情，先执行：python3 scripts/kanban_update.py show {task_id}；不要读取 kanban/{task_id}.json 或 data/kanban.json。\n'
-            f'请先更新看板：python3 scripts/kanban_update.py progress {task_id} "尚书省正在分析方案并准备派发六部" "确认方案🔄|选择部门|派发六部|汇总回奏"\n'
-            f'然后执行：python3 scripts/kanban_update.py state {task_id} Doing "尚书省派发任务给六部"\n'
-            f'再执行：python3 scripts/kanban_update.py flow {task_id} "尚书省" "六部" "📮 尚书省派发六部执行"\n'
+            f'请先更新看板：python3 scripts/kanban_update.py progress {task_id} "尚书省正在分析方案并准备交办六部" "确认方案🔄|选择部门|交办六部|汇总回奏"\n'
+            f'然后执行：python3 scripts/kanban_update.py state {task_id} Doing "尚书省交办任务给六部"\n'
+            f'再执行：python3 scripts/kanban_update.py flow {task_id} "尚书省" "六部" "📮 尚书省交办六部执行"\n'
             f'最后调用需要的六部 subagent 执行并汇总。'
             f'{isolation_text}'
         ),
@@ -9471,7 +10109,7 @@ def _build_dispatch_payload(task_id, task, new_state, agent_id, trigger):
         f'如需任务详情，先执行：python3 scripts/kanban_update.py show {task_id}；不要猜测单任务 JSON 路径。\n'
         f'目标仓库若是外部目录，请用 bash 的 ls/find/rg/sed 查看；不要用 read 工具直接读取目录路径。\n'
         f'如果任务当前已经是 Doing，不要再执行 state {task_id} Doing；请直接 progress/flow/todo。\n'
-        f'本次派发必须有明确收口：完成就先把相关 todo 标为 completed，再执行 done；不能完成就执行 block 并写明阻塞原因。'
+        f'本次交办必须有明确收口：完成就先把相关 todo 标为 completed，再执行 done；不能完成就执行 block 并写明阻塞原因。'
         f'{isolation_text}'
     ))
     return {
@@ -9532,7 +10170,11 @@ def _process_handoff_outbox_item(item):
     tasks = load_tasks()
     task = next((t for t in tasks if t.get('id') == task_id), None)
     if not task:
-        _outbox_mark_failed(item.get('id', ''), f'task {task_id} not found')
+        _outbox_mark_done(item.get('id', ''), {
+            'stale': True,
+            'missingTask': True,
+            'reason': f'task {task_id} not found',
+        })
         return
     if task.get('state') != state:
         _outbox_mark_done(item.get('id', ''), {'stale': True, 'currentState': task.get('state', '')})
@@ -9582,7 +10224,7 @@ def _execute_dispatch_outbox_item(item):
             'dispatchId': dispatch_id,
             'expectedState': new_state,
             'currentState': task.get('state', ''),
-            'remark': '任务状态已变化，过期派发已跳过',
+            'remark': '任务状态已变化，过期执行请求已跳过',
         }, confidence='high', trace_id=trace_id)
         return
     expected_agent = _expected_agent_for_task(task, new_state)
@@ -9596,7 +10238,7 @@ def _execute_dispatch_outbox_item(item):
             'dispatchId': dispatch_id,
             'expectedAgent': expected_agent,
             'agentId': agent_id,
-            'remark': '派发目标已变化，过期派发已跳过',
+            'remark': '交办目标已变化，过期执行请求已跳过',
         }, confidence='high', trace_id=trace_id)
         return
     title = payload.get('title') or task.get('title', '(无标题)')
@@ -9683,7 +10325,7 @@ def _execute_dispatch_outbox_item(item):
                 'currentState': stale['state'],
                 'error': error,
                 'sessionId': session_id,
-                'remark': '过期派发结果已忽略',
+                'remark': '过期执行结果已忽略',
             }, confidence='high', trace_id=trace_id)
             _outbox_mark_done(dispatch_id, {'stale': True, 'status': status})
             return False
@@ -9692,7 +10334,7 @@ def _execute_dispatch_outbox_item(item):
     policy_blocked, policy_gate = _task_policy_gate_blocks_dispatch(task)
     if policy_blocked:
         reason = policy_gate.get('reason') or '执行前需要权限审批或审议准奏'
-        flow_msg = f'权限闸门拦截派发：{reason}'
+        flow_msg = f'权限闸门暂停交办：{reason}'
         if _update_if_current('policy-held', error=reason, flow_remark=flow_msg):
             _append_runtime_event('dispatch_policy_blocked', task_id, agent_id, {
                 'from': runtime_label,
@@ -9725,7 +10367,7 @@ def _execute_dispatch_outbox_item(item):
                 'trigger': trigger,
                 'status': 'gateway-offline',
                 'dispatchId': dispatch_id,
-                'remark': f'{runtime_label} 未启动，派发跳过',
+                'remark': f'{runtime_label} 未启动，执行请求跳过',
             }, confidence='low', trace_id=trace_id)
             _outbox_mark_failed(dispatch_id, 'gateway offline', {'status': 'gateway-offline'})
             return
@@ -9734,7 +10376,7 @@ def _execute_dispatch_outbox_item(item):
             if not opencode_bin:
                 err = 'OpenCode CLI 未找到：请确认已安装 opencode 并加入 PATH；可设置 OPENCODE_BIN 指向 opencode 可执行文件'
                 status = 'opencode-missing'
-                flow_msg = f'派发异常：OpenCode CLI 未找到（{trigger}）'
+                flow_msg = f'执行请求异常：OpenCode CLI 未找到（{trigger}）'
                 log.warning(f'⚠️ {task_id} 自动派发异常: {err}')
                 _update_if_current(status, error=err, flow_remark=flow_msg)
                 _append_runtime_event('dispatch_missing_cli', task_id, agent_id, {
@@ -9759,15 +10401,15 @@ def _execute_dispatch_outbox_item(item):
             if model_id:
                 cmd.extend(['--model', model_id])
             cmd.append(msg)
-            if not _opencode_session_probe(agent_id):
+            if not _opencode_session_probe(agent_id, directory=dispatch_dir):
                 err = 'OpenCode session probe failed before dispatch'
                 log.warning(f'⚠️ {task_id} OpenCode session 预检失败，准备重启 server 后派发')
                 _record_opencode_session_recovery(task_id, agent_id, trigger, dispatch_id, 0, err, trace_id)
-                if not _restart_opencode_server():
+                if not _restart_opencode_server(directory=dispatch_dir):
                     _update_if_current(
                         'opencode-session-stale',
                         error=err,
-                        flow_remark=f'派发前 OpenCode 会话预检失败：{agent_id}（{trigger}）',
+                        flow_remark=f'执行前 OpenCode 会话预检失败：{agent_id}（{trigger}）',
                     )
                     _append_runtime_event('dispatch_failed', task_id, agent_id, {
                         'from': runtime_label,
@@ -9775,7 +10417,7 @@ def _execute_dispatch_outbox_item(item):
                         'trigger': trigger,
                         'status': 'opencode-session-stale',
                         'dispatchId': dispatch_id,
-                        'remark': f'派发前 OpenCode 会话预检失败: {agent_id}（{trigger}）',
+                        'remark': f'执行前 OpenCode 会话预检失败: {agent_id}（{trigger}）',
                         'error': err,
                     }, confidence='low', trace_id=trace_id)
                     _outbox_mark_failed(dispatch_id, err, {'status': 'opencode-session-stale'})
@@ -9786,7 +10428,7 @@ def _execute_dispatch_outbox_item(item):
                     'trigger': trigger,
                     'status': 'opencode-session-recovered',
                     'dispatchId': dispatch_id,
-                    'remark': 'OpenCode session 预检失败，已重启 server 并继续派发',
+                    'remark': 'OpenCode session 预检失败，已重启 server 并继续交办',
                 }, confidence='medium', trace_id=trace_id)
         else:
             agent_cfg = read_json(DATA / 'agent_config.json', {})
@@ -9798,7 +10440,7 @@ def _execute_dispatch_outbox_item(item):
                 _update_if_current(
                     'openclaw-missing',
                     error=err,
-                    flow_remark=f'派发异常：OpenClaw CLI 未找到（{trigger}）',
+                    flow_remark=f'执行请求异常：OpenClaw CLI 未找到（{trigger}）',
                 )
                 _append_runtime_event('dispatch_missing_cli', task_id, agent_id, {
                     'from': runtime_label,
@@ -9806,7 +10448,7 @@ def _execute_dispatch_outbox_item(item):
                     'trigger': trigger,
                     'status': 'openclaw-missing',
                     'dispatchId': dispatch_id,
-                    'remark': f'派发异常：OpenClaw CLI 未找到（{trigger}）',
+                    'remark': f'执行请求异常：OpenClaw CLI 未找到（{trigger}）',
                     'error': err,
                 }, confidence='low', trace_id=trace_id)
                 _outbox_mark_failed(dispatch_id, err, {'status': 'openclaw-missing'})
@@ -9827,7 +10469,7 @@ def _execute_dispatch_outbox_item(item):
                 'attempt': attempt,
                 'dispatchId': dispatch_id,
                 'executionIsolation': execution_isolation,
-                'remark': f'开始派发: {agent_id} (第{attempt}次)',
+                'remark': f'开始交办: {agent_id} (第{attempt}次)',
             }, trace_id=trace_id)
             dispatch_perf_started = time.perf_counter()
             dispatch_latency_ms = None
@@ -9848,7 +10490,7 @@ def _execute_dispatch_outbox_item(item):
                         final_status = 'opencode-session-stale'
                         session_failure_status = final_status
                         _record_opencode_session_recovery(task_id, agent_id, trigger, dispatch_id, attempt, err, trace_id)
-                        if attempt < max_retries and _restart_opencode_server():
+                        if attempt < max_retries and _restart_opencode_server(directory=dispatch_dir):
                             continue
                     _append_runtime_event('dispatch_failed', task_id, agent_id, {
                         'from': runtime_label,
@@ -9902,7 +10544,7 @@ def _execute_dispatch_outbox_item(item):
                 if _update_if_current(
                     'success',
                     session_id=session_id,
-                    flow_remark=f'派发成功：{agent_id}（{trigger}）',
+                    flow_remark=f'执行请求成功：{agent_id}（{trigger}）',
                 ):
                     _outbox_mark_done(dispatch_id, {'status': 'success', 'sessionId': session_id, 'traceId': trace_id})
                     if session_id:
@@ -9925,7 +10567,7 @@ def _execute_dispatch_outbox_item(item):
                     'attempt': attempt,
                     'sessionId': session_id,
                     'dispatchId': dispatch_id,
-                    'remark': f'派发成功: {agent_id}（{trigger}）',
+                    'remark': f'执行请求成功: {agent_id}（{trigger}）',
                 }, trace_id=trace_id, session_id=session_id)
                 return
             err = _runtime_error_summary(
@@ -9937,7 +10579,7 @@ def _execute_dispatch_outbox_item(item):
                 final_status = 'opencode-session-stale'
                 log.warning(f'⚠️ {task_id} OpenCode session registry 异常，准备重启 server 后重试')
                 _record_opencode_session_recovery(task_id, agent_id, trigger, dispatch_id, attempt, err, trace_id)
-                if attempt < max_retries and _restart_opencode_server():
+                if attempt < max_retries and _restart_opencode_server(directory=dispatch_dir):
                     continue
             log.warning(f'⚠️ {task_id} 自动派发失败(第{attempt}次): {err}')
             if attempt < max_retries:
@@ -9967,7 +10609,7 @@ def _execute_dispatch_outbox_item(item):
         _update_if_current(
             final_status,
             error=err,
-            flow_remark=f'派发失败：{agent_id}（{trigger}）',
+            flow_remark=f'执行请求失败：{agent_id}（{trigger}）',
         )
         _append_runtime_event('dispatch_failed', task_id, agent_id, {
             'from': runtime_label,
@@ -9975,14 +10617,14 @@ def _execute_dispatch_outbox_item(item):
             'trigger': trigger,
             'status': final_status,
             'dispatchId': dispatch_id,
-            'remark': f'派发失败: {agent_id}（{trigger}）',
+            'remark': f'执行请求失败: {agent_id}（{trigger}）',
             'error': err,
         }, confidence='low', trace_id=trace_id)
         _outbox_mark_failed(dispatch_id, err, {'status': final_status})
     except subprocess.TimeoutExpired as exc:
         timeout_error = _runtime_error_summary(
             getattr(exc, 'stderr', '') or getattr(exc, 'output', ''),
-            default=f'{runtime_label} 派发超时（{agent_id}，{trigger}）',
+            default=f'{runtime_label} 执行请求超时（{agent_id}，{trigger}）',
             limit=300,
         )
         log.error(f'❌ {task_id} 自动派发超时 → {agent_id}')
@@ -10010,7 +10652,7 @@ def _execute_dispatch_outbox_item(item):
         _update_if_current(
             'timeout',
             error=timeout_error,
-            flow_remark=f'派发超时：{agent_id}（{trigger}）',
+            flow_remark=f'执行请求超时：{agent_id}（{trigger}）',
         )
         _append_runtime_event('dispatch_failed', task_id, agent_id, {
             'from': runtime_label,
@@ -10018,7 +10660,7 @@ def _execute_dispatch_outbox_item(item):
             'trigger': trigger,
             'status': 'timeout',
             'dispatchId': dispatch_id,
-            'remark': f'派发超时: {agent_id}（{trigger}）',
+            'remark': f'执行请求超时: {agent_id}（{trigger}）',
             'error': timeout_error,
         }, confidence='low', trace_id=trace_id)
         _outbox_mark_failed(dispatch_id, timeout_error, {'status': 'timeout'})
@@ -10030,7 +10672,7 @@ def _execute_dispatch_outbox_item(item):
         _update_if_current(
             missing_status,
             error=err[:200],
-            flow_remark=f'派发异常：{missing_runtime} CLI 未找到（{trigger}）',
+            flow_remark=f'执行请求异常：{missing_runtime} CLI 未找到（{trigger}）',
         )
         _append_runtime_event('dispatch_missing_cli', task_id, agent_id, {
             'from': runtime_label,
@@ -10038,7 +10680,7 @@ def _execute_dispatch_outbox_item(item):
             'trigger': trigger,
             'status': missing_status,
             'dispatchId': dispatch_id,
-            'remark': f'派发异常：{missing_runtime} CLI 未找到（{trigger}）',
+            'remark': f'执行请求异常：{missing_runtime} CLI 未找到（{trigger}）',
             'error': err[:200],
         }, confidence='low', trace_id=trace_id)
         _outbox_mark_failed(dispatch_id, err[:200], {'status': missing_status})
@@ -10047,7 +10689,7 @@ def _execute_dispatch_outbox_item(item):
         _update_if_current(
             'error',
             error=str(e)[:200],
-            flow_remark=f'派发异常：{agent_id}（{trigger}）',
+            flow_remark=f'执行请求异常：{agent_id}（{trigger}）',
         )
         _append_runtime_event('dispatch_failed', task_id, agent_id, {
             'from': runtime_label,
@@ -10055,7 +10697,7 @@ def _execute_dispatch_outbox_item(item):
             'trigger': trigger,
             'status': 'error',
             'dispatchId': dispatch_id,
-            'remark': f'派发异常: {agent_id}（{trigger}）',
+            'remark': f'执行请求异常: {agent_id}（{trigger}）',
             'error': str(e)[:200],
         }, confidence='low', trace_id=trace_id)
         _outbox_mark_failed(dispatch_id, str(e)[:200], {'status': 'error'})
@@ -10099,7 +10741,7 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
             'trigger': trigger,
             'status': existing_dispatch.get('status') or 'queued',
             'dispatchId': dispatch_id,
-            'remark': f'已有未完成派发，跳过重复入队: {new_state} -> {agent_id}',
+            'remark': f'已有未完成执行请求，跳过重复入队: {new_state} -> {agent_id}',
         }, trace_id=trace_id)
         _kick_dispatch_worker()
         log.info(f'ℹ️ {task_id} 已有未完成派发，跳过重复入队 → {agent_id}')
@@ -10124,7 +10766,7 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
             s.pop('activeDispatchId', None),
             s.pop('activeDispatchState', None),
             s.pop('activeDispatchStartedAt', None),
-            _scheduler_add_flow(t, f'权限闸门拦截派发：{reason}', to=_STATE_LABELS.get(new_state, new_state))
+            _scheduler_add_flow(t, f'权限闸门暂停交办：{reason}', to=_STATE_LABELS.get(new_state, new_state))
         ))
         _append_runtime_event('dispatch_policy_blocked', task_id, agent_id, {
             'from': 'scheduler',
@@ -10135,7 +10777,7 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
             'dispatchId': dispatch_id,
             'policyGate': policy_gate,
             'reason': reason,
-            'remark': 'RunSpec 权限闸门未释放，派发已拦截',
+            'remark': 'RunSpec 权限闸门未释放，交办已暂停',
         }, confidence='high', trace_id=trace_id)
         log.info(f'⏸️ {task_id} 派发被权限闸门拦截 → {agent_id}: {reason}')
         return
@@ -10173,7 +10815,7 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
             'dispatchId': dispatch_id,
             'executionIsolation': failed_isolation,
             'error': err,
-            'remark': '专属 worktree 分配失败，已拦截派发',
+            'remark': '专属 worktree 分配失败，已暂停交办',
         }, confidence='high', trace_id=trace_id)
         log.warning(f'⚠️ {task_id} 专属 worktree 分配失败，派发拦截: {err}')
         return
@@ -10218,7 +10860,7 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
             'activeDispatchState': new_state,
             'activeDispatchStartedAt': dispatch_started_at,
         }),
-        _scheduler_add_flow(t, f'已入队派发：{new_state} → {agent_id}（{trigger}）', to=_STATE_LABELS.get(new_state, new_state))
+        _scheduler_add_flow(t, f'已入队交办：{new_state} → {agent_id}（{trigger}）', to=_STATE_LABELS.get(new_state, new_state))
     ))
     if not updated:
         return
@@ -10239,7 +10881,7 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
         'trigger': trigger,
         'status': 'queued',
         'dispatchId': dispatch_id,
-        'remark': f'已入队派发: {new_state} -> {agent_id}',
+        'remark': f'已入队交办: {new_state} -> {agent_id}',
     }, trace_id=trace_id)
     _kick_dispatch_worker()
     log.info(f'🚀 {task_id} 推进后自动派发已入 outbox → {agent_id}')
@@ -10277,7 +10919,7 @@ def handle_advance_state(task_id, comment=''):
 
     from_label = _STATE_LABELS.get(cur, cur)
     to_label = _STATE_LABELS.get(next_state, next_state)
-    dispatched = ' (已自动派发 Agent)' if next_state != 'Done' else ''
+    dispatched = ' (已自动交办 Agent)' if next_state != 'Done' else ''
     return {'ok': True, 'message': f'{task_id} {from_label} → {to_label}{dispatched}'}
 
 
@@ -10332,6 +10974,16 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def send_redirect(self, location, code=302):
+        try:
+            self.send_response(code)
+            self.send_header('Location', location)
+            self.send_header('Content-Length', '0')
+            cors_headers(self)
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def _serve_static(self, rel_path):
         """从 dist/ 目录提供静态文件。"""
         safe = rel_path.replace('\\', '/').lstrip('/')
@@ -10366,7 +11018,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._check_auth():
             return
-        if p in ('', '/dashboard', '/dashboard.html'):
+        if p == '/dashboard.html':
+            self.send_redirect('/dashboard', 301)
+        elif p in ('', '/dashboard'):
             self.send_file(DIST / 'index.html')
         elif p == '/healthz':
             task_data_dir = get_task_data_dir()
@@ -10966,7 +11620,7 @@ class Handler(BaseHTTPRequestHandler):
                 cfg['dispatchChannel'] = channel
                 return cfg
             atomic_json_update(DATA / 'agent_config.json', _set_channel, {})
-            self.send_json({'ok': True, 'message': f'派发渠道已切换为 {channel}'})
+            self.send_json({'ok': True, 'message': f'交办渠道已切换为 {channel}'})
 
         # ── 朝堂议政 POST ──
         elif p == '/api/court-discuss/start':

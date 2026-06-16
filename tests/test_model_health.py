@@ -112,8 +112,8 @@ def test_model_failover_updates_configs_and_logs(monkeypatch, tmp_path):
     assert health['failovers'][-1]['newModel'] == fallback_model
 
 
-def test_model_probe_timeout_auto_failovers_current_agents(monkeypatch, tmp_path):
-    """Continuous model probes should switch agents away from a timed-out current model."""
+def test_continuous_model_probe_records_without_auto_failover(monkeypatch, tmp_path):
+    """Background probes should observe model health without silently changing agents."""
     import server as srv
 
     data_dir = tmp_path / 'data'
@@ -138,7 +138,44 @@ def test_model_probe_timeout_auto_failovers_current_agents(monkeypatch, tmp_path
         'timeout',
         latency_ms=120000,
         error='provider request timeout after 120s',
-        source='test-probe',
+        source='continuous-probe',
+    )
+
+    cfg = json.loads((data_dir / 'agent_config.json').read_text(encoding='utf-8'))
+    ocfg = json.loads((tmp_path / 'opencode.json').read_text(encoding='utf-8'))
+
+    assert 'autoFailovers' not in probe
+    assert cfg['agents'][0]['model'] == current_model
+    assert ocfg['agent']['taizi']['model'] == current_model
+
+
+def test_manual_model_probe_timeout_auto_failovers_current_agents(monkeypatch, tmp_path):
+    """Manual/active probes may still switch agents away from a timed-out current model."""
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    dashboard_dir = tmp_path / 'dashboard'
+    dashboard_dir.mkdir()
+    current_model = 'github-copilot/claude-opus-4.6'
+    fallback_model = 'openai-codex/gpt-5.3-codex'
+    _write_agent_config(data_dir, current_model, fallback_model)
+    (tmp_path / 'opencode.json').write_text(
+        json.dumps({'model': current_model, 'agent': {'taizi': {'model': current_model}}}, ensure_ascii=False),
+        encoding='utf-8',
+    )
+
+    monkeypatch.setenv('EDICT_RUNTIME', 'opencode')
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, 'BASE', dashboard_dir)
+    monkeypatch.setattr(srv, '_append_runtime_event', lambda *args, **kwargs: None)
+
+    probe = srv._record_model_probe(
+        current_model,
+        'timeout',
+        latency_ms=120000,
+        error='provider request timeout after 120s',
+        source='manual-probe',
     )
 
     cfg = json.loads((data_dir / 'agent_config.json').read_text(encoding='utf-8'))
@@ -248,6 +285,190 @@ def test_model_registry_merges_opencode_cli_server_manual_and_latency(monkeypatc
     assert registry['summary']['total'] == 4
 
 
+def test_opencode_probe_uses_agent_api_not_slow_doc(monkeypatch, tmp_path):
+    """Runtime health should follow the dispatch API, not the slow docs/root pages."""
+    import server as srv
+
+    dashboard_dir = tmp_path / 'dashboard'
+    dashboard_dir.mkdir()
+    (tmp_path / 'opencode.json').write_text('{}', encoding='utf-8')
+    monkeypatch.setattr(srv, 'BASE', dashboard_dir)
+    monkeypatch.setattr(srv, 'PROJECT_ROOT', tmp_path)
+    monkeypatch.setenv('OPENCODE_SERVER_URL', 'http://127.0.0.1:4096')
+
+    calls = []
+
+    class FakeResponse:
+        def read(self):
+            return json.dumps(
+                [
+                    {'name': 'taizi'},
+                    {'name': 'zhongshu'},
+                    {'name': 'shangshu'},
+                ]
+            ).encode('utf-8')
+
+    def fake_urlopen(req, timeout=0):
+        url = getattr(req, 'full_url', str(req))
+        calls.append(url)
+        assert '/doc' not in url
+        return FakeResponse()
+
+    monkeypatch.setattr(srv, 'urlopen', fake_urlopen)
+
+    assert srv._check_opencode_probe() is True
+    assert any('/agent?' in url for url in calls)
+
+
+def test_disabled_continuous_probe_does_not_poison_registry_status(monkeypatch, tmp_path):
+    """Stopped background probe results should remain history, not current model status."""
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    model_id = 'opencode/deepseek-v4-flash-free'
+    (data_dir / 'model_probes.json').write_text(
+        json.dumps(
+            {
+                'version': 1,
+                'config': {'enabled': False, 'intervalSec': 300, 'timeoutSec': 25, 'modelIds': [model_id]},
+                'records': {
+                    model_id: {
+                        'model': model_id,
+                        'status': 'timeout',
+                        'source': 'continuous-probe',
+                        'updatedAt': '2026-06-10T14:36:50Z',
+                        'latencyMs': 25000,
+                        'lastError': 'probe timeout after 25s',
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+
+    assert srv._model_probe_latency_snapshot() == {}
+    probes = srv.get_model_probes()
+    assert probes['summary']['total'] == 0
+    assert probes['summary']['measured'] == 0
+    assert probes['summary']['statuses']['timeout'] == 0
+    assert probes['records'] == {}
+    assert probes['recent'] == []
+
+
+def test_model_health_sanitizes_legacy_dispatch_wording(monkeypatch, tmp_path):
+    """Old health records may contain dispatch wording; public API should use execution wording."""
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    model_id = 'opencode/deepseek-v4-flash-free'
+    _write_agent_config(data_dir, model_id, 'opencode/mimo-v2.5-free')
+    (data_dir / 'model_health.json').write_text(
+        json.dumps(
+            {
+                'version': 1,
+                'records': {
+                    f'taizi::{model_id}': {
+                        'agentId': 'taizi',
+                        'model': model_id,
+                        'status': 'timeout',
+                        'lastError': 'OpenCode 派发超时（taizi，imperial-edict）',
+                        'lastFailureAt': srv.now_iso(),
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_check_gateway_alive', lambda: True)
+    monkeypatch.setattr(srv, '_check_gateway_probe', lambda: True)
+    monkeypatch.setattr(srv, '_outbox_list', lambda **kwargs: [])
+
+    data = srv.get_model_health()
+    taizi = next(agent for agent in data['agents'] if agent['agentId'] == 'taizi')
+
+    assert '执行请求超时' in taizi['lastError']
+    assert '派发超时' not in taizi['lastError']
+
+
+def test_model_health_uses_fresh_probe_instead_of_stale_failure(monkeypatch, tmp_path):
+    """Expired failures should be historical evidence, not the current model status."""
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    model_id = 'opencode/deepseek-v4-flash-free'
+    _write_agent_config(data_dir, model_id, 'opencode/nemotron-3-ultra-free')
+    old_ts = '2000-01-01T00:00:00Z'
+    fresh_ts = srv.now_iso()
+    (data_dir / 'model_health.json').write_text(
+        json.dumps(
+            {
+                'version': 1,
+                'records': {
+                    f'taizi::{model_id}': {
+                        'agentId': 'taizi',
+                        'model': model_id,
+                        'status': 'timeout',
+                        'lastError': 'opencode/deepseek-v4-flash-free: unknown certificate verification error',
+                        'updatedAt': old_ts,
+                        'lastFailureAt': old_ts,
+                        'failureCount': 3,
+                        'timeoutCount': 1,
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding='utf-8',
+    )
+    (data_dir / 'model_probes.json').write_text(
+        json.dumps(
+            {
+                'version': 1,
+                'config': {'enabled': True, 'modelIds': [model_id]},
+                'records': {
+                    model_id: {
+                        'model': model_id,
+                        'status': 'ok',
+                        'updatedAt': fresh_ts,
+                        'source': 'continuous-probe',
+                        'latencyMs': 7313,
+                        'averageLatencyMs': 9816,
+                        'latencyCount': 8,
+                        'lastError': '',
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_check_gateway_alive', lambda: True)
+    monkeypatch.setattr(srv, '_check_gateway_probe', lambda: True)
+    monkeypatch.setattr(srv, '_outbox_list', lambda **kwargs: [])
+
+    data = srv.get_model_health()
+    taizi = next(agent for agent in data['agents'] if agent['agentId'] == 'taizi')
+
+    assert data['summary']['ok'] == 1
+    assert data['summary']['timeout'] == 0
+    assert taizi['status'] == 'ok'
+    assert taizi['source'] == 'model_probe'
+    assert taizi['lastError'] == ''
+    assert taizi['lastFailureAt'] == ''
+    assert taizi['lastSuccessAt'] == fresh_ts
+    assert taizi['staleEvidence'] is True
+    assert taizi['historicalLastFailureAt'] == old_ts
+    assert 'certificate' in taizi['historicalLastError']
+
+
 def test_model_probe_records_latency_into_registry(monkeypatch, tmp_path):
     """Active probes should measure a model and make the registry show real latency."""
     import subprocess
@@ -349,6 +570,160 @@ def test_run_model_probes_now_starts_background_batch(monkeypatch, tmp_path):
     assert result['started'] is True
     assert result['count'] == 1
     assert calls == [['opencode/big-pickle']]
+
+
+def test_model_registry_returns_stale_cache_without_live_probe(monkeypatch, tmp_path):
+    """Default registry reads should not block on OpenCode when a cache exists."""
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    (data_dir / 'model_registry.json').write_text(
+        json.dumps(
+            {
+                'version': 2,
+                'ok': True,
+                'runtime': 'opencode',
+                'generatedAt': '2000-01-01T00:00:00Z',
+                'sources': [],
+                'summary': {'total': 1, 'measured': 0, 'unmeasured': 1, 'providers': {}, 'statuses': {'unknown': 1}},
+                'models': [{'id': 'opencode/deepseek-v4-flash-free', 'label': 'DeepSeek', 'provider': 'OpenCode'}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_opencode_cli_model_entries', lambda force=False: (_ for _ in ()).throw(AssertionError('live CLI should not be called')))
+    monkeypatch.setattr(srv, '_opencode_provider_model_entries', lambda: (_ for _ in ()).throw(AssertionError('live provider should not be called')))
+
+    registry = srv.get_model_registry(force=False)
+
+    assert registry['ok'] is True
+    assert registry['stale'] is True
+    assert registry['refreshRecommended'] is True
+    assert registry['models'][0]['id'] == 'opencode/deepseek-v4-flash-free'
+
+
+def test_model_registry_ignores_expired_health_latency(monkeypatch, tmp_path):
+    """Old model health should stay historical instead of coloring current availability."""
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    model_id = 'opencode/deepseek-v4-flash-free'
+    old_ts = '2000-01-01T00:00:00Z'
+    (data_dir / 'agent_config.json').write_text(
+        json.dumps(
+            {
+                'runtime': 'opencode',
+                'defaultModel': model_id,
+                'knownModels': [{'id': model_id, 'label': 'DeepSeek', 'provider': 'OpenCode'}],
+                'agents': [{'id': 'taizi', 'label': '太子', 'model': model_id}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding='utf-8',
+    )
+    (data_dir / 'model_health.json').write_text(
+        json.dumps(
+            {
+                'records': {
+                    'taizi::opencode/deepseek-v4-flash-free': {
+                        'agentId': 'taizi',
+                        'model': model_id,
+                        'status': 'timeout',
+                        'statusLabel': '连接超时',
+                        'lastLatencyMs': 310000,
+                        'averageLatencyMs': 310000,
+                        'latencyCount': 1,
+                        'updatedAt': old_ts,
+                        'lastFailureAt': old_ts,
+                        'lastError': 'old timeout',
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_opencode_cli_model_entries', lambda force=False: (
+        [{'id': model_id, 'label': 'DeepSeek', 'provider': 'OpenCode', 'source': 'opencode-cli'}],
+        {'id': 'opencode-cli', 'label': 'OpenCode CLI', 'ok': True, 'count': 1, 'latencyMs': 1, 'error': ''},
+    ))
+    monkeypatch.setattr(srv, '_opencode_provider_model_entries', lambda: (
+        [],
+        {'id': 'opencode-server', 'label': 'OpenCode Server', 'ok': True, 'count': 0, 'latencyMs': 1, 'error': ''},
+    ))
+
+    registry = srv.get_model_registry(force=True)
+    entry = registry['models'][0]
+
+    assert entry['recentStatus'] == 'unknown'
+    assert entry['latencyMs'] is None
+    assert entry['lastError'] == ''
+    assert registry['summary']['measured'] == 0
+    assert registry['summary']['statuses']['unknown'] == 1
+
+
+def test_empty_probe_request_uses_current_agent_models(monkeypatch, tmp_path):
+    """An empty probe request should not expand to the entire model registry."""
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    current_model = 'opencode/deepseek-v4-flash-free'
+    extra_model = 'github-copilot/claude-opus-4.8'
+    (data_dir / 'agent_config.json').write_text(
+        json.dumps(
+            {
+                'runtime': 'opencode',
+                'defaultModel': current_model,
+                'knownModels': [{'id': current_model}, {'id': extra_model}],
+                'agents': [{'id': 'taizi', 'label': '太子', 'model': current_model}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding='utf-8',
+    )
+    (data_dir / 'model_registry.json').write_text(
+        json.dumps(
+            {
+                'version': 2,
+                'ok': True,
+                'runtime': 'opencode',
+                'generatedAt': srv.now_iso(),
+                'sources': [],
+                'summary': {'total': 2, 'measured': 0, 'unmeasured': 2, 'providers': {}, 'statuses': {'unknown': 2}},
+                'models': [{'id': current_model}, {'id': extra_model}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding='utf-8',
+    )
+    monkeypatch.setenv('EDICT_RUNTIME', 'opencode')
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+
+    calls = []
+
+    class ImmediateThread:
+        def __init__(self, target, args=(), kwargs=None, **_):
+            self.target = target
+            self.args = args
+            self.kwargs = kwargs or {}
+
+        def start(self):
+            calls.append(self.args[0])
+
+    monkeypatch.setattr(srv, '_REAL_THREAD', ImmediateThread)
+
+    result = srv.run_model_probes_now({})
+
+    assert result['ok'] is True
+    assert result['scope'] == 'current-agent-models'
+    assert result['count'] == 1
+    assert calls == [[current_model]]
 
 
 def test_model_failover_prefers_observed_ok_model_over_unsupported_same_tier(monkeypatch, tmp_path):

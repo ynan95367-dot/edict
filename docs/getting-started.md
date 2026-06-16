@@ -100,7 +100,7 @@ open http://127.0.0.1:7891
 
 </details>
 
-> 💡 **看板即开即用**：`server.py` 内嵌 `dashboard/dashboard.html`，无需额外构建。Docker 镜像包含预构建的 React 前端。
+> 💡 **看板即开即用**：`server.py` 直接提供 API 和 `dashboard/dist/` 中的 React 前端。Docker 镜像包含预构建产物；本地源码运行前请先执行 `npm run build` 或 `./install.sh`。
 
 ## 第五步：发送第一道旨意
 

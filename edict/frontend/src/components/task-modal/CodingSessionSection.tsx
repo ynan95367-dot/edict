@@ -22,6 +22,17 @@ export function CodingSessionSection({
   const runtimeSession = data.runtimeSession || {};
   const sessionStatus = runtimeSession.status || (data.sessionId ? 'bound' : 'unbound');
   const sessionTone = sessionStatus === 'trace-mismatch' ? 'err' : sessionStatus === 'bound' || sessionStatus === 'observed' ? 'ok' : 'warn';
+  const runGraph = data.runSpec?.runGraph;
+  const graphSummary = runGraph?.summary;
+  const graphNodes = (runGraph?.nodes || []).slice(0, 7);
+  const graphStatus: Record<string, string> = {
+    ready: '就绪',
+    planned: '计划',
+    waiting: '等待',
+    blocked: '阻断',
+    required: '必需',
+    missing: '缺失',
+  };
 
   return (
     <div className="cockpit">
@@ -46,6 +57,30 @@ export function CodingSessionSection({
         <div className="cockpit-cell"><span>产物</span><b>{s.outputCount}</b></div>
         <div className="cockpit-cell"><span>事件</span><b>{s.eventCount}</b></div>
       </div>
+
+      {!!graphNodes.length && (
+        <div className="cockpit-run-graph">
+          <div className="cockpit-run-graph-head">
+            <div>
+              <b>执行图</b>
+              <span>{graphSummary?.runtime || runGraph?.runKind || data.runtime} · {graphSummary?.nodeCount || graphNodes.length} 节点 · {graphSummary?.edgeCount || 0} 边</span>
+            </div>
+            <em className={graphSummary?.blockedByPolicy ? 'warn' : 'ok'}>
+              {graphSummary?.blockedByPolicy ? '等待释放' : '可推进'}
+            </em>
+          </div>
+          <div className="cockpit-run-node-list">
+            {graphNodes.map((node, index) => (
+              <div className={`cockpit-run-node ${node.status || 'planned'}`} key={node.id}>
+                <span>{index + 1}</span>
+                <b>{node.label}</b>
+                <small>{node.dept || node.kind}</small>
+                <em>{graphStatus[node.status || ''] || node.status || node.kind}</em>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <IsolationHealthStrip health={data.isolationHealth} />
       <IsolationStrip isolation={data.executionIsolation} />

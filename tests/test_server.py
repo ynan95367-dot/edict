@@ -42,6 +42,35 @@ def test_healthz(tmp_path):
     httpd.server_close()
 
 
+def test_legacy_dashboard_html_redirects_to_react_route(tmp_path, monkeypatch):
+    import server as srv
+
+    dist = tmp_path / 'dist'
+    dist.mkdir()
+    (dist / 'index.html').write_text('<html>react</html>', encoding='utf-8')
+    monkeypatch.setattr(srv, 'DIST', dist)
+
+    from http.server import HTTPServer
+    port = 18972
+
+    httpd = HTTPServer(('127.0.0.1', port), srv.Handler)
+    t = threading.Thread(target=httpd.handle_request, daemon=True)
+    t.start()
+
+    time.sleep(0.1)
+    conn = HTTPConnection('127.0.0.1', port, timeout=5)
+    conn.request('GET', '/dashboard.html')
+    resp = conn.getresponse()
+    resp.read()
+    location = resp.getheader('Location')
+    conn.close()
+
+    assert resp.status == 301
+    assert location == '/dashboard'
+
+    httpd.server_close()
+
+
 def test_output_files_lists_docs_and_task_outputs(tmp_path, monkeypatch):
     import server as srv
 
@@ -245,12 +274,149 @@ def test_runtime_outbox_health_exposes_dead_letters(tmp_path, monkeypatch):
     assert health['failed'] == 1
     assert health['pending'] == 1
     assert health['summary']['tone'] == 'err'
-    assert health['summary']['label'] == '失败 1'
+    assert health['summary']['label'] == '当前任务失败 1'
+    assert health['summary']['blockingLayer'] == 'queue'
+    assert health['layers']['current']['failed'] == 1
+    assert health['layers']['current']['pending'] == 1
     assert health['trend']['failed'] == 0
     assert health['deadLetters'][0]['taskId'] == 'JJC-FAIL-1'
     assert health['deadLetters'][0]['taskTitle'] == '派发失败任务'
     assert health['deadLetters'][0]['lastError'] == 'gateway offline'
     assert health['activeItems'][0]['taskId'] == 'JJC-PEND-1'
+
+
+def test_runtime_outbox_health_separates_ghost_pending_from_current_failures(tmp_path, monkeypatch):
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    data_dir.joinpath('tasks_source.json').write_text(json.dumps([
+        {'id': 'JJC-CURRENT-1', 'title': '当前代码任务', 'state': 'Taizi'},
+    ], ensure_ascii=False), encoding='utf-8')
+    outbox_path = data_dir / 'runtime_outbox.json'
+    outbox_path.write_text(json.dumps([
+        {
+            'id': 'ghost_handoff',
+            'kind': 'handoff',
+            'taskId': 'T-4',
+            'state': 'Review',
+            'agentId': 'shangshu',
+            'status': 'pending',
+            'createdAt': '2026-06-12T15:03:22Z',
+            'updatedAt': '2026-06-12T15:03:22Z',
+        },
+        {
+            'id': 'current_timeout',
+            'kind': 'dispatch',
+            'taskId': 'JJC-CURRENT-1',
+            'state': 'Taizi',
+            'agentId': 'taizi',
+            'status': 'failed',
+            'createdAt': '2026-06-12T15:04:00Z',
+            'updatedAt': '2026-06-12T15:04:20Z',
+            'lastError': 'OpenCode 执行请求超时（taizi，imperial-edict）',
+        },
+        {
+            'id': 'current_failed',
+            'kind': 'dispatch',
+            'taskId': 'JJC-CURRENT-1',
+            'state': 'Taizi',
+            'agentId': 'taizi',
+            'status': 'failed',
+            'createdAt': '2026-06-12T15:04:22Z',
+            'updatedAt': '2026-06-12T15:05:22Z',
+            'lastError': 'opencode/deepseek-v4-flash-free: unknown certificate verification error',
+        },
+    ], ensure_ascii=False), encoding='utf-8')
+
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
+    monkeypatch.setattr(srv._runtime_outbox, 'OUTBOX_FILE', outbox_path)
+
+    health = srv.get_runtime_outbox_health()
+
+    assert health['layers']['current']['failed'] == 2
+    assert health['layers']['ghost']['pending'] == 1
+    assert health['layers']['current']['label'] == '当前任务阻塞'
+    assert health['layers']['ghost']['label'] == '幽灵任务噪音'
+    assert health['summary']['tone'] == 'err'
+    assert health['summary']['blockingLayer'] == 'model'
+    assert '模型连接失败' in health['summary']['detail']
+    assert '幽灵任务' in health['layers']['ghost']['detail']
+
+
+def test_runtime_outbox_health_downgrades_history_only_failures(tmp_path, monkeypatch):
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    data_dir.joinpath('tasks_source.json').write_text('[]', encoding='utf-8')
+    outbox_path = data_dir / 'runtime_outbox.json'
+    outbox_path.write_text(json.dumps([
+        {
+            'id': 'old_failed',
+            'kind': 'dispatch',
+            'taskId': 'JJC-OLD-1',
+            'state': 'Taizi',
+            'agentId': 'taizi',
+            'status': 'failed',
+            'createdAt': '2026-06-10T10:00:00Z',
+            'updatedAt': '2026-06-10T10:01:00Z',
+            'lastError': 'OpenCode 执行请求超时（taizi，imperial-edict）',
+        },
+    ], ensure_ascii=False), encoding='utf-8')
+
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
+    monkeypatch.setattr(srv._runtime_outbox, 'OUTBOX_FILE', outbox_path)
+
+    health = srv.get_runtime_outbox_health()
+
+    assert health['failed'] == 1
+    assert health['layers']['current']['failed'] == 0
+    assert health['layers']['history']['failed'] == 1
+    assert health['summary']['tone'] == 'warn'
+    assert health['summary']['label'] == '仅历史失败'
+    assert '不会判定当前任务失败' in health['summary']['detail']
+
+
+def test_missing_task_handoff_is_closed_as_stale(tmp_path, monkeypatch):
+    import server as srv
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    data_dir.joinpath('tasks_source.json').write_text('[]', encoding='utf-8')
+    outbox_path = data_dir / 'runtime_outbox.json'
+    outbox_path.write_text(json.dumps([
+        {
+            'id': 'handoff_missing',
+            'kind': 'handoff',
+            'taskId': 'T-MISSING',
+            'state': 'Review',
+            'agentId': 'shangshu',
+            'trigger': 'kanban-done',
+            'traceId': 'trc_missing',
+            'status': 'pending',
+            'attempts': 0,
+            'maxAttempts': 3,
+            'createdAt': '2026-06-10T00:00:00Z',
+            'updatedAt': '2026-06-10T00:00:00Z',
+            'lastError': '',
+        },
+    ], ensure_ascii=False), encoding='utf-8')
+
+    monkeypatch.setattr(srv, 'DATA', data_dir)
+    monkeypatch.setattr(srv, '_ACTIVE_TASK_DATA_DIR', data_dir)
+    monkeypatch.setattr(srv._runtime_outbox, 'OUTBOX_FILE', outbox_path)
+
+    srv._process_handoff_outbox_item(json.loads(outbox_path.read_text(encoding='utf-8'))[0])
+
+    updated = json.loads(outbox_path.read_text(encoding='utf-8'))[0]
+    assert updated['status'] == 'done'
+    assert updated['result']['stale'] is True
+    assert updated['result']['missingTask'] is True
+    assert 'T-MISSING' in updated['result']['reason']
+    assert srv.get_runtime_outbox_health()['failed'] == 0
 
 
 def test_runtime_outbox_health_warns_about_stale_pending(tmp_path, monkeypatch):
@@ -517,7 +683,7 @@ def test_scheduler_state_exposes_opencode_session_diagnosis(tmp_path, monkeypatc
     assert diag['label'] == 'OpenCode 会话失效'
     assert diag['retryable'] is True
     assert diag['action'] == 'retry'
-    assert diag['actionLabel'] == '重试派发'
+    assert diag['actionLabel'] == '重新交办'
     assert 'OpenCode 会话失效' in diag['actionReason']
     assert 'Session not found' in diag['detail']
 
@@ -663,11 +829,11 @@ def test_scheduler_state_warns_when_success_dispatch_stalls(tmp_path, monkeypatc
     assert result['ok'] is True
     diag = result['dispatchDiagnosis']
     assert diag['tone'] == 'warn'
-    assert diag['label'] == '已派发但未推进'
+    assert diag['label'] == '已交办但未推进'
     assert diag['retryable'] is True
     assert diag['action'] == 'scan'
     assert diag['actionLabel'] == '立即扫描'
-    assert '已派发但未推进' in diag['actionReason']
+    assert '已交办但未推进' in diag['actionReason']
     assert '立即扫描' in diag['nextAction']
 
 
@@ -1412,6 +1578,35 @@ def test_coding_session_summarizes_task_execution(tmp_path, monkeypatch):
         'flow_log': [
             {'at': '2026-05-31T09:00:00Z', 'from': '皇上', 'to': '太子', 'remark': '下旨'},
         ],
+        'runSpec': {
+            'mode': 'execute',
+            'riskLevel': 'high',
+            'runKind': 'system',
+            'targetDept': '兵部',
+            'requiredCapabilities': ['governance.plan', 'runtime.opencode', 'shell.command', 'artifact.outputs'],
+            'governance': [
+                {'stage': 'intake', 'dept': '太子', 'label': '意图分拣'},
+                {'stage': 'plan', 'dept': '中书省', 'label': '生成 RunSpec'},
+                {'stage': 'approval', 'dept': '皇上', 'label': '人工确认'},
+            ],
+            'toolPolicy': {
+                'permissions': ['agent.run', 'shell.execute'],
+                'requiresApproval': True,
+                'approvalReason': 'shell.execute 需要确认',
+            },
+            'policyGate': {
+                'decision': 'hold_for_policy',
+                'status': 'waiting_policy_approval',
+                'reason': 'shell.execute 需要确认',
+                'requiresApproval': True,
+            },
+            'executionIsolation': {
+                'mode': 'patch_first_shared_worktree',
+                'targetMode': 'dedicated_worktree',
+                'label': 'Patch-first 隔离',
+                'required': True,
+            },
+        },
         'progress_log': [
             {
                 'at': '2026-05-31T09:10:00Z',
@@ -1469,6 +1664,9 @@ def test_coding_session_summarizes_task_execution(tmp_path, monkeypatch):
     source_ref = next(item for item in session['files'] if item['path'] == 'scripts/worker.py')
     assert source_ref['lastStartLine'] == 1
     assert source_ref['lastEndLine'] == 2
+    assert session['runSpec']['runGraph']['status'] == 'waiting_policy'
+    assert session['runSpec']['runGraph']['summary']['blockedByPolicy'] is True
+    assert any(node['id'] == 'policy.gate' for node in session['runSpec']['runGraph']['nodes'])
 
 
 def test_capability_registry_defaults_when_file_missing(tmp_path, monkeypatch):
@@ -1517,6 +1715,16 @@ def test_preview_run_spec_includes_tool_policy(tmp_path, monkeypatch):
     assert run['executionIsolation']['targetMode'] == 'dedicated_worktree'
     assert run['executionIsolation']['requiresPatchReview'] is True
     assert any(item['id'] == 'shell.command' for item in run['capabilityPolicies'])
+    graph = run['runGraph']
+    assert graph['version'] == 'run-graph-v1'
+    assert graph['status'] == 'waiting_policy'
+    assert graph['summary']['blockedByPolicy'] is True
+    assert graph['summary']['runtime'] == 'runtime.opencode'
+    node_ids = {node['id'] for node in graph['nodes']}
+    assert 'policy.gate' in node_ids
+    assert 'control.wait' in node_ids
+    assert 'isolation.prepare' in node_ids
+    assert 'capability.shell.command' in node_ids
 
 
 def test_allocate_task_worktree_creates_dedicated_git_worktree(tmp_path, monkeypatch):
@@ -1710,6 +1918,8 @@ def test_shell_run_spec_requires_policy_approval_without_dispatch(tmp_path, monk
     assert task['_scheduler']['policyGateDecision'] == 'hold_for_policy'
     assert task['runSpec']['policyGate']['status'] == 'waiting_policy_approval'
     assert task['runSpec']['toolPolicy']['requiresApproval'] is True
+    assert task['runSpec']['runGraph']['status'] == 'waiting_policy'
+    assert task['runSpec']['runGraph']['summary']['blockedByPolicy'] is True
 
 
 def test_auto_run_spec_infers_profile_fields_when_omitted(tmp_path, monkeypatch):
@@ -1861,7 +2071,7 @@ def test_plan_run_spec_holds_for_review_without_dispatch(tmp_path, monkeypatch):
     assert task['_scheduler']['lastDispatchStatus'] == 'held'
     assert task['_scheduler']['lastDispatchTrigger'] == 'plan-first'
     assert task['runSpec']['mode'] == 'plan'
-    assert '暂不自动派发执行' in task['flow_log'][-1]['remark']
+    assert '暂不自动交办执行' in task['flow_log'][-1]['remark']
 
     outbox_path = data / 'runtime_outbox.json'
     assert not outbox_path.exists() or json.loads(outbox_path.read_text(encoding='utf-8')) == []
