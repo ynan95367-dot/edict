@@ -10974,6 +10974,53 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def _serve_sse_stream(self):
+        """SSE: push a 'live-status' event whenever live_status.json changes.
+
+        Push-only stream for the dashboard. One thread per connection
+        (ThreadingHTTPServer); returns when the client disconnects.
+        """
+        task_data_dir = get_task_data_dir()
+        live_file = task_data_dir / 'live_status.json'
+        try:
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Connection', 'keep-alive')
+            self.send_header('X-Accel-Buffering', 'no')
+            cors_headers(self)
+            self.end_headers()
+        except Exception:
+            return
+
+        def _mtime():
+            try:
+                return live_file.stat().st_mtime if live_file.exists() else 0.0
+            except OSError:
+                return 0.0
+
+        last_mtime = _mtime()
+        last_ping = time.time()
+        try:
+            self.wfile.write(b'event: live-status\ndata: {"type":"init"}\n\n')
+            self.wfile.flush()
+            while True:
+                mtime = _mtime()
+                now = time.time()
+                if mtime != last_mtime:
+                    last_mtime = mtime
+                    payload = json.dumps({'type': 'live-status', 'mtime': mtime})
+                    self.wfile.write(f'event: live-status\ndata: {payload}\n\n'.encode('utf-8'))
+                    self.wfile.flush()
+                    last_ping = now
+                elif now - last_ping >= 15:
+                    self.wfile.write(b': keep-alive\n\n')
+                    self.wfile.flush()
+                    last_ping = now
+                time.sleep(1)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+
     def send_redirect(self, location, code=302):
         try:
             self.send_response(code)
@@ -11031,6 +11078,9 @@ class Handler(BaseHTTPRequestHandler):
         elif p == '/api/live-status':
             task_data_dir = get_task_data_dir()
             self.send_json(read_json(task_data_dir / 'live_status.json'))
+        elif p == '/api/stream':
+            self._serve_sse_stream()
+            return
         elif p == '/api/agent-config':
             force_refresh = (qs.get('refresh') or [''])[0] in {'1', 'true', 'yes'}
             self.send_json(get_agent_config_response(force=force_refresh))
