@@ -168,6 +168,29 @@ export const api = {
     fetchJ<{ ok: boolean; event: string }>(`${API_BASE}/api/court-discuss/fate`),
 };
 
+/**
+ * SSE 实时订阅 live_status 变更。每次变更触发 onChange()。
+ * 浏览器原生 EventSource 自动重连;EventSource 不可用时返回 no-op。
+ * 返回取消订阅函数。
+ */
+export function subscribeLiveStatus(onChange: () => void): () => void {
+  if (typeof EventSource === 'undefined') return () => {};
+  let es: EventSource | null = null;
+  try {
+    es = new EventSource(`${API_BASE}/api/stream`);
+  } catch {
+    return () => {};
+  }
+  es.addEventListener('live-status', () => onChange());
+  return () => {
+    try {
+      es?.close();
+    } catch {
+      /* noop */
+    }
+  };
+}
+
 // ── Types ──
 
 export interface ActionResult {
