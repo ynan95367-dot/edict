@@ -6,6 +6,7 @@
 import { create } from 'zustand';
 import {
   api,
+  subscribeLiveStatus,
   type Task,
   type LiveStatus,
   type AgentConfig,
@@ -441,6 +442,24 @@ export function stopPolling() {
   if (_cdTimer) {
     clearInterval(_cdTimer);
     _cdTimer = null;
+  }
+}
+
+// ── SSE realtime (push); polling above remains as fallback ──
+
+let _esUnsub: (() => void) | null = null;
+
+export function startRealtime() {
+  if (_esUnsub) return;
+  _esUnsub = subscribeLiveStatus(() => {
+    useStore.getState().loadLive();
+  });
+}
+
+export function stopRealtime() {
+  if (_esUnsub) {
+    _esUnsub();
+    _esUnsub = null;
   }
 }
 
