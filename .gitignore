@@ -67,3 +67,9 @@ _*.py
 data/**/*.db
 data/**/*.db-wal
 data/**/*.db-shm
+
+# Runtime outputs / test artifacts (machine-generated)
+outputs/
+edict/frontend/test-results/
+opencode.json.lock
+opencode.json.lock/
