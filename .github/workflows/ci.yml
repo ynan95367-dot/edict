@@ -105,7 +105,9 @@ jobs:
           cache-dependency-path: edict/backend/requirements.txt
 
       - name: Install backend dependencies
-        run: pip install -r edict/backend/requirements.txt
+        run: |
+          pip install -r edict/backend/requirements.txt
+          pip install -r edict/backend/requirements-dev.txt
 
       - name: Syntax check (py_compile)
         run: |
@@ -117,6 +119,12 @@ jobs:
       - name: Run Alembic migrations
         working-directory: edict
         run: python -m alembic upgrade head
+
+      - name: Run backend tests
+        working-directory: edict/backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://edict:edict_dev_2024@localhost:5432/edict
+        run: python -m pytest tests/ -v
 
       - name: Verify FastAPI app imports
         working-directory: edict/backend
