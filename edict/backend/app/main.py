@@ -54,11 +54,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — 开发环境允许所有来源
+# CORS — 可配置白名单（env CORS_ORIGINS，逗号分隔；默认本地开发源）
+_cors_origins = get_settings().cors_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=("*" not in _cors_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 from sqlalchemy.engine.url import make_url
 
@@ -26,6 +26,22 @@ class Settings(BaseSettings):
     port: int = 8000
     secret_key: str = "change-me-in-production"
     debug: bool = False
+
+    # ── CORS ──
+    # declared as str | list[str] so pydantic-settings allows JSON-parse failure
+    # on raw comma-separated env values; the validator normalises to list[str].
+    cors_origins: str | list[str] = [
+        "http://localhost:5173",
+        "http://localhost:7891",
+        "http://127.0.0.1:7891",
+    ]
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _split_cors_origins(cls, v):
+        if isinstance(v, str):
+            return [o.strip() for o in v.split(",") if o.strip()]
+        return v
 
     # ── Agent Runtime ──
     agent_runtime: str = "openclaw"  # openclaw | opencode
