@@ -1,5 +1,5 @@
 import type { CSSProperties, RefObject } from 'react';
-import type { ActivityEntry, TaskActivityData } from '../../api';
+import type { ActivityEntry, ActivityToolCall, ActivityToolRun, TaskActivityData } from '../../api';
 import { formatDashboardDateTime } from '../../time';
 import {
   activityKey,
@@ -43,7 +43,9 @@ export function LiveActivitySection({ data, isDone, logRef }: LiveActivitySectio
       ? 'warn'
       : 'err';
   const currentPhase = phaseDurations.find((p) => p.ongoing) || phaseDurations[phaseDurations.length - 1];
-  const timeline = compactActivity(activity);
+  const toolRuns = data.toolRuns || [];
+  const pairedToolRunIds = new Set(toolRuns.map((run) => run.toolRunId).filter(Boolean));
+  const timeline = compactActivity(activity).filter((entry) => shouldShowTimelineEntry(entry, pairedToolRunIds));
 
   return (
     <div className="la-section">
@@ -114,6 +116,18 @@ export function LiveActivitySection({ data, isDone, logRef }: LiveActivitySectio
         </div>
       )}
 
+      {toolRuns.length > 0 && (
+        <div className="la-toolruns">
+          <div className="la-toolruns-head">
+            <span>工具执行</span>
+            <b>{toolRuns.length} 条</b>
+          </div>
+          <div className="la-toolrun-grid">
+            {toolRuns.slice(-6).reverse().map((run) => <ToolRunCard key={run.toolRunId} run={run} />)}
+          </div>
+        </div>
+      )}
+
       <div className="la-log" ref={logRef as RefObject<HTMLDivElement>}>
         {timeline.length > 0 ? (
           timeline.map((a, i) => <ActivityEntryView key={`${activityKey(a)}-${i}`} entry={a} />)
@@ -125,6 +139,15 @@ export function LiveActivitySection({ data, isDone, logRef }: LiveActivitySectio
       </div>
     </div>
   );
+}
+
+function shouldShowTimelineEntry(entry: ActivityEntry, pairedToolRunIds: Set<string>): boolean {
+  if (!pairedToolRunIds.size) return true;
+  if (entry.kind === 'tool_result' && entry.toolRunId && pairedToolRunIds.has(entry.toolRunId)) return false;
+  if (entry.kind === 'assistant' && entry.tools?.length && !entry.text && !entry.thinking) {
+    return !entry.tools.every((tool) => tool.toolRunId && pairedToolRunIds.has(tool.toolRunId));
+  }
+  return true;
 }
 
 function ActivityEntryView({ entry: a }: { entry: ActivityEntry }) {
@@ -209,9 +232,16 @@ function ActivityEntryView({ entry: a }: { entry: ActivityEntry }) {
           </div>
         )}
         {a.tools?.map((tc, i) => (
-          <div className="la-entry la-tool" key={i}>
+          <div className={`la-entry la-tool ${toolTone(tc.status)}`} key={toolCallKey(a, tc, i)}>
             <span className="la-icon">🔧</span>
-            <span className="la-body">{agBadge}<span className="la-tool-name">{tc.name}</span><span className="la-trunc">{tc.input_preview || ''}</span></span>
+            <span className="la-body">
+              {agBadge}
+              <span className="la-tool-head">
+                <span className="la-tool-name">{tc.name}</span>
+                <span className={`la-tool-status ${toolTone(tc.status)}`}>{tc.statusLabel || toolStatusLabel(tc.status)}</span>
+              </span>
+              <span className="la-trunc">{toolSummary(tc)}</span>
+            </span>
             <span className="la-time">{time}</span>
           </div>
         ))}
@@ -231,7 +261,15 @@ function ActivityEntryView({ entry: a }: { entry: ActivityEntry }) {
     return (
       <div className={`la-entry la-tool-result ${ok ? 'ok' : 'err'}`}>
         <span className="la-icon">{ok ? '✅' : '❌'}</span>
-        <span className="la-body">{agBadge}<span className="la-tool-name">{a.tool || ''}</span>{a.output ? a.output.substring(0, 150) : ''}</span>
+        <span className="la-body">
+          {agBadge}
+          <span className="la-tool-head">
+            <span className="la-tool-name">{a.tool || 'tool'}</span>
+            <span className={`la-tool-status ${toolTone(a.status, a.exitCode)}`}>{a.statusLabel || toolStatusLabel(a.status, a.exitCode)}</span>
+            {a.durationMs ? <span className="la-tool-duration">{formatDuration(a.durationMs)}</span> : null}
+          </span>
+          <span className="la-trunc">{toolResultSummary(a)}</span>
+        </span>
         <span className="la-time">{time}</span>
       </div>
     );
@@ -252,6 +290,72 @@ function ActivityEntryView({ entry: a }: { entry: ActivityEntry }) {
       <span className="la-icon">•</span>
       <span className="la-body">{agBadge}<span className="la-tool-name">{a.eventKind || a.kind}</span>{a.text || a.remark || ''}</span>
       <span className="la-time">{time}</span>
+    </div>
+  );
+}
+
+function toolTone(status?: string, exitCode?: number | null): 'ok' | 'warn' | 'err' | 'idle' {
+  if (exitCode !== undefined && exitCode !== null && exitCode !== 0) return 'err';
+  if (status === 'completed') return 'ok';
+  if (status === 'running' || status === 'started' || status === 'queued' || status === 'pending') return 'warn';
+  if (status === 'failed' || status === 'error' || status === 'rejected' || status === 'denied') return 'err';
+  return 'idle';
+}
+
+function toolStatusLabel(status?: string, exitCode?: number | null): string {
+  if (exitCode !== undefined && exitCode !== null && exitCode !== 0) return '异常';
+  if (status === 'completed') return '已完成';
+  if (status === 'running' || status === 'started') return '执行中';
+  if (status === 'queued' || status === 'pending') return '排队中';
+  if (status === 'rejected' || status === 'denied') return '已拒绝';
+  if (status === 'failed' || status === 'error') return '异常';
+  return '已记录';
+}
+
+function compact(value?: string, max = 170): string {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const sec = ms / 1000;
+  return sec < 60 ? `${sec.toFixed(sec >= 10 ? 0 : 1)}s` : `${Math.floor(sec / 60)}m${Math.round(sec % 60)}s`;
+}
+
+function toolSummary(tool: ActivityToolCall): string {
+  return compact(tool.inputSummary || tool.input_preview || tool.command || tool.path || '');
+}
+
+function toolResultSummary(entry: ActivityEntry): string {
+  return compact(entry.output || entry.command || entry.path || entry.inputSummary || '');
+}
+
+function toolCallKey(entry: ActivityEntry, tool: ActivityToolCall, index: number): string {
+  if (tool.toolRunId) return `tool-call:${tool.toolRunId}`;
+  if (tool.callId) return `tool-call:${tool.callId}`;
+  return `${activityKey(entry)}:tool:${tool.name}:${index}`;
+}
+
+function ToolRunCard({ run }: { run: ActivityToolRun }) {
+  const tone = toolTone(run.status, run.exitCode);
+  const primary = compact(run.inputSummary || run.command || run.path || run.tool || '工具调用', 150);
+  const result = compact(run.output || '', 170);
+  const time = fmtActivityTime(run.endedAt || run.startedAt);
+  return (
+    <div className={`la-toolrun ${tone}`}>
+      <div className="la-toolrun-top">
+        <span className="la-toolrun-name">{run.tool || 'tool'}</span>
+        <span className={`la-tool-status ${tone}`}>{run.statusLabel || toolStatusLabel(run.status, run.exitCode)}</span>
+        {run.durationMs ? <span className="la-tool-duration">{formatDuration(run.durationMs)}</span> : null}
+      </div>
+      <div className="la-toolrun-main">{primary}</div>
+      {result && <div className="la-toolrun-result">{result}</div>}
+      <div className="la-toolrun-meta">
+        {run.agent ? <span>{AGENT_LABELS[run.agent] || run.agent}</span> : null}
+        {time ? <span>{time}</span> : null}
+      </div>
     </div>
   );
 }

@@ -28,6 +28,10 @@ sys.path.insert(0, scripts_dir)
 from file_lock import atomic_json_read, atomic_json_write, atomic_json_update
 from store import get_task_store
 from utils import validate_url, read_json, now_iso, python_bin
+try:
+    import evidence_gate as _evidence_gate
+except Exception:  # pragma: no cover - acceptance compilation must not break RunSpec
+    _evidence_gate = None
 import runtime_outbox as _runtime_outbox
 from runtime_outbox import (
     enqueue_dispatch as _outbox_enqueue_dispatch,
@@ -132,6 +136,16 @@ def _append_runtime_event(kind, task_id='', agent_id='', payload=None, evidence=
     """Best-effort append to the task/agent event ledger."""
     if _ledger_append_event is None:
         return None
+    # Stamp dispatch events with the model in play so the outcome ledger can
+    # later attribute success/failure per model (the Learning Broker's signal,
+    # absent today: 0 of ~292 dispatch events carry a model).
+    if kind.startswith('dispatch_') and agent_id and isinstance(payload, dict) and 'model' not in payload:
+        try:
+            _model = _agent_current_model(agent_id)
+            if _model:
+                payload = {**payload, 'model': _model}
+        except Exception:
+            pass
     try:
         return _ledger_append_event(
             kind,
@@ -3195,6 +3209,22 @@ def _infer_deliverable(goal, run_kind, capability_ids, mode):
     return '结果摘要、关键证据和后续建议'
 
 
+def _infer_acceptance(goal, run_kind, capability_ids, mode, deliverable):
+    """Compile a typed acceptance contract (predicate list) for this RunSpec.
+
+    Delegates to the shared evidence_gate vocabulary so the proactive contract
+    declared here and the reactive check at收口 time cannot drift. Paths are
+    bound later, at done-time, from the runtime-declared output. Returns ``[]``
+    when there is nothing verifiable on disk (honest, never a fake check).
+    """
+    if _evidence_gate is None:
+        return []
+    try:
+        return _evidence_gate.acceptance_for_runspec(run_kind, capability_ids, mode, deliverable)
+    except Exception:  # pragma: no cover - defensive
+        return []
+
+
 def _infer_constraints(goal, risk_level, mode):
     text = (goal or '').lower()
     items = []
@@ -3409,6 +3439,7 @@ def _prepare_run_spec(payload, run_id='RUN-PREVIEW', task_id='', created_at='', 
     constraints_input = str(payload.get('constraints') or '').strip()
     deliverable = deliverable_input or _infer_deliverable(goal, run_kind, capability_ids, mode)
     constraints = constraints_input or _infer_constraints(goal, risk_level, mode)
+    acceptance = _infer_acceptance(goal, run_kind, capability_ids, mode, deliverable)
     clarification = _intent_clarification(goal, capability_ids, run_kind, mode, deliverable_input, constraints_input)
     if requested_mode == 'auto' and mode == 'execute' and clarification.get('shouldAsk'):
         mode = 'interactive'
@@ -3488,6 +3519,7 @@ def _prepare_run_spec(payload, run_id='RUN-PREVIEW', task_id='', created_at='', 
         'runGraph': run_graph,
         'constraints': constraints,
         'deliverable': deliverable,
+        'acceptance': acceptance,
         'profile': profile,
         'createdAt': created_at,
         'updatedAt': created_at,
@@ -8131,6 +8163,52 @@ def _opencode_tool_context(raw_input):
     return path, command, start_line, end_line
 
 
+def _opencode_tool_run_id(message, part):
+    message = _dict(message)
+    part = _dict(part)
+    state = _dict(part.get('state'))
+    session_id = message.get('sessionID') or part.get('sessionID') or ''
+    message_id = message.get('id') or part.get('messageID') or ''
+    call_id = part.get('callID') or state.get('callID') or part.get('id') or ''
+    return ':'.join(str(x) for x in (session_id, message_id, call_id) if x)
+
+
+def _opencode_tool_duration_ms(part):
+    part = _dict(part)
+    state_time = _dict(_dict(part.get('state')).get('time'))
+    part_time = _dict(part.get('time'))
+    start = state_time.get('start') or part_time.get('start')
+    end = state_time.get('end') or part_time.get('end')
+    try:
+        if start is None or end is None:
+            return 0
+        start_num = float(start)
+        end_num = float(end)
+        delta = max(0.0, end_num - start_num)
+        if not delta:
+            return 0
+        # OpenCode JSON storage commonly uses milliseconds; DB rows can be seconds.
+        if max(abs(start_num), abs(end_num)) < 10_000_000_000:
+            delta *= 1000
+        return int(delta)
+    except Exception:
+        return 0
+
+
+def _tool_status_label(status, exit_code=None):
+    if status == 'completed' and (exit_code is None or exit_code == 0):
+        return '已完成'
+    if status in {'running', 'started', 'pending'}:
+        return '执行中'
+    if status in {'queued'}:
+        return '排队中'
+    if status in {'rejected', 'denied'}:
+        return '已拒绝'
+    if exit_code not in (None, 0) or status in {'error', 'failed'}:
+        return '异常'
+    return status or '已记录'
+
+
 def _parse_opencode_parts(message, limit_per_message=20):
     message = _dict(message)
     parts = _opencode_parts_for_message(message)
@@ -8167,10 +8245,22 @@ def _parse_opencode_parts(message, limit_per_message=20):
             status = state.get('status', '')
             raw_input = state.get('input')
             path, command, start_line, end_line = _opencode_tool_context(raw_input)
+            tool_run_id = _opencode_tool_run_id(message, part)
+            input_summary = _opencode_input_preview(raw_input)
+            metadata = _dict(state.get('metadata'))
+            exit_code = metadata.get('exit')
+            if exit_code is None and status and status != 'completed':
+                exit_code = 1
+            duration_ms = _opencode_tool_duration_ms(part)
+            status_label = _tool_status_label(status, exit_code)
             tool_call = {
                 'name': tool_name,
-                'input_preview': _opencode_input_preview(raw_input),
+                'input_preview': input_summary,
+                'inputSummary': input_summary,
                 'callId': part.get('callID', ''),
+                'toolRunId': tool_run_id,
+                'status': status,
+                'statusLabel': status_label,
             }
             if isinstance(raw_input, dict):
                 tool_call['input'] = raw_input
@@ -8185,30 +8275,35 @@ def _parse_opencode_parts(message, limit_per_message=20):
                 'tools': [tool_call],
                 'source': 'opencode-storage',
                 'eventKind': 'opencode_tool_call',
+                'eventId': f'tool_call:{tool_run_id}' if tool_run_id else '',
+                'toolRunId': tool_run_id,
+                'status': status,
+                'statusLabel': status_label,
                 'messageId': message.get('id', ''),
                 'sessionId': message.get('sessionID', ''),
             }
             entries.append(tool_entry)
 
             output = state.get('output') or state.get('error') or state.get('title') or ''
-            metadata = _dict(state.get('metadata'))
             if not output and isinstance(metadata, dict):
                 output = metadata.get('output') or metadata.get('preview') or metadata.get('description') or ''
-            exit_code = metadata.get('exit')
-            if exit_code is None and status and status != 'completed':
-                exit_code = 1
             entries.append({
                 'at': _opencode_ts_to_iso((_dict(state.get('time')).get('end')) or _opencode_part_time(part)),
                 'kind': 'tool_result',
                 'agent': agent,
                 'tool': tool_name,
-                    'output': _display_project_text(output).strip()[:250],
+                'output': _display_project_text(output).strip()[:250],
                 'exitCode': exit_code,
                 'path': path,
                 'command': command,
                 'startLine': start_line,
                 'endLine': end_line,
                 'status': status,
+                'statusLabel': status_label,
+                'durationMs': duration_ms,
+                'inputSummary': input_summary,
+                'toolRunId': tool_run_id,
+                'eventId': f'tool_result:{tool_run_id}' if tool_run_id else '',
                 'source': 'opencode-storage',
                 'eventKind': 'opencode_tool_result',
                 'messageId': message.get('id', ''),
@@ -8619,6 +8714,8 @@ def _compute_todos_diff(prev_todos, curr_todos):
 
 def _activity_key(entry):
     entry = _dict(entry)
+    if entry.get('eventId'):
+        return ('event', entry.get('eventId', ''))
     kind = entry.get('kind', '')
     at = entry.get('at', '')
     if kind == 'flow':
@@ -8686,6 +8783,96 @@ def _compact_activity_for_ui(activity, limit=_ACTIVITY_UI_LIMIT):
     if len(selected) > limit:
         selected = selected[-limit:]
     return selected, {'total': total, 'returned': len(selected), 'truncated': True}
+
+
+def _build_tool_runs(activity, limit=12):
+    """Pair tool call/result activity into compact UI cards."""
+    runs = {}
+    order = []
+
+    def _ensure(tool_run_id):
+        if not tool_run_id:
+            return None
+        if tool_run_id not in runs:
+            runs[tool_run_id] = {
+                'toolRunId': tool_run_id,
+                'tool': '',
+                'agent': '',
+                'status': '',
+                'statusLabel': '',
+                'inputSummary': '',
+                'output': '',
+                'exitCode': None,
+                'durationMs': 0,
+                'path': '',
+                'command': '',
+                'startedAt': '',
+                'endedAt': '',
+                'source': '',
+                'sessionId': '',
+                'messageId': '',
+                'eventIds': [],
+            }
+            order.append(tool_run_id)
+        return runs[tool_run_id]
+
+    def _remember_event(run, event_id):
+        if event_id and event_id not in run['eventIds']:
+            run['eventIds'].append(event_id)
+
+    for entry in activity or []:
+        if not isinstance(entry, dict):
+            continue
+        kind = entry.get('kind', '')
+        if kind == 'assistant':
+            for tool_call in entry.get('tools') or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                tool_run_id = tool_call.get('toolRunId') or entry.get('toolRunId') or ''
+                run = _ensure(tool_run_id)
+                if not run:
+                    continue
+                run['tool'] = tool_call.get('name') or run['tool']
+                run['agent'] = entry.get('agent') or run['agent']
+                run['status'] = tool_call.get('status') or entry.get('status') or run['status']
+                run['statusLabel'] = tool_call.get('statusLabel') or entry.get('statusLabel') or run['statusLabel']
+                run['inputSummary'] = tool_call.get('inputSummary') or tool_call.get('input_preview') or run['inputSummary']
+                run['path'] = tool_call.get('path') or run['path']
+                run['command'] = tool_call.get('command') or run['command']
+                run['startedAt'] = entry.get('at') or run['startedAt']
+                run['source'] = entry.get('source') or run['source']
+                run['sessionId'] = entry.get('sessionId') or run['sessionId']
+                run['messageId'] = entry.get('messageId') or run['messageId']
+                _remember_event(run, entry.get('eventId', ''))
+        elif kind == 'tool_result':
+            tool_run_id = entry.get('toolRunId') or ''
+            run = _ensure(tool_run_id)
+            if not run:
+                continue
+            run['tool'] = entry.get('tool') or run['tool']
+            run['agent'] = entry.get('agent') or run['agent']
+            run['status'] = entry.get('status') or run['status']
+            run['statusLabel'] = entry.get('statusLabel') or run['statusLabel']
+            run['inputSummary'] = entry.get('inputSummary') or run['inputSummary']
+            run['output'] = entry.get('output') or run['output']
+            run['exitCode'] = entry.get('exitCode')
+            run['durationMs'] = int(entry.get('durationMs') or run['durationMs'] or 0)
+            run['path'] = entry.get('path') or run['path']
+            run['command'] = entry.get('command') or run['command']
+            run['endedAt'] = entry.get('at') or run['endedAt']
+            run['source'] = entry.get('source') or run['source']
+            run['sessionId'] = entry.get('sessionId') or run['sessionId']
+            run['messageId'] = entry.get('messageId') or run['messageId']
+            _remember_event(run, entry.get('eventId', ''))
+
+    result = []
+    for tool_run_id in order:
+        run = runs[tool_run_id]
+        if not run['statusLabel']:
+            run['statusLabel'] = _tool_status_label(run.get('status'), run.get('exitCode'))
+        result.append(run)
+    result.sort(key=lambda x: x.get('endedAt') or x.get('startedAt') or '')
+    return result[-limit:] if limit and len(result) > limit else result
 
 
 def _parse_activity_dt(value):
@@ -8964,17 +9151,24 @@ def _classify_tool_event(activity_entry, tool_call):
     at = activity_entry.get('at', '')
     agent = activity_entry.get('agent', '')
     preview = payload.get('_preview') or command or path
+    meta = dict(payload)
+    for key in ('toolRunId', 'callId', 'status', 'statusLabel', 'inputSummary'):
+        if tool_call.get(key) not in (None, ''):
+            meta[key] = tool_call.get(key)
+    for key in ('eventId', 'eventKind', 'sessionId', 'messageId'):
+        if activity_entry.get(key) not in (None, ''):
+            meta[key] = activity_entry.get(key)
 
     if tool_name in {'read', 'view', 'open'}:
-        return _coding_event('file.read', f'读取文件 {path or ""}'.strip(), at=at, agent=agent, path=path, detail=preview, source=activity_entry.get('source', ''), meta=payload, start_line=start_line, end_line=end_line)
+        return _coding_event('file.read', f'读取文件 {path or ""}'.strip(), at=at, agent=agent, path=path, detail=preview, source=activity_entry.get('source', ''), meta=meta, start_line=start_line, end_line=end_line)
     if tool_name in {'edit', 'write', 'patch', 'multiedit', 'delete', 'remove', 'unlink', 'rm'}:
-        return _coding_event('file.change', f'修改文件 {path or ""}'.strip(), at=at, agent=agent, path=path, detail=preview, source=activity_entry.get('source', ''), meta=payload, start_line=start_line, end_line=end_line)
+        return _coding_event('file.change', f'修改文件 {path or ""}'.strip(), at=at, agent=agent, path=path, detail=preview, source=activity_entry.get('source', ''), meta=meta, start_line=start_line, end_line=end_line)
     if tool_name in {'grep', 'glob', 'list', 'ls', 'search'}:
-        return _coding_event('tool.search', tool_name or '搜索', at=at, agent=agent, path=path, detail=preview, source=activity_entry.get('source', ''))
+        return _coding_event('tool.search', tool_name or '搜索', at=at, agent=agent, path=path, detail=preview, source=activity_entry.get('source', ''), meta=meta)
     if tool_name in {'bash', 'shell', 'terminal'}:
         is_test = bool(re.search(r'\b(pytest|npm test|pnpm test|yarn test|vitest|playwright|tsc|mypy|ruff)\b', command))
-        return _coding_event('test.run' if is_test else 'shell.run', command or '运行命令', at=at, agent=agent, command=command, detail=preview, source=activity_entry.get('source', ''))
-    return _coding_event('tool.call', tool_name or '工具调用', at=at, agent=agent, detail=preview, source=activity_entry.get('source', ''))
+        return _coding_event('test.run' if is_test else 'shell.run', command or '运行命令', at=at, agent=agent, command=command, detail=preview, source=activity_entry.get('source', ''), meta=meta)
+    return _coding_event('tool.call', tool_name or '工具调用', at=at, agent=agent, detail=preview, source=activity_entry.get('source', ''), meta=meta)
 
 
 def _task_output_group(task_id):
@@ -9163,7 +9357,13 @@ def get_task_coding_session(task_id):
                 source=entry.get('source', ''),
                 meta={
                     'tool': tool_name,
+                    'toolRunId': entry.get('toolRunId') or '',
+                    'inputSummary': entry.get('inputSummary') or '',
+                    'status': entry.get('status') or '',
+                    'statusLabel': entry.get('statusLabel') or '',
+                    'durationMs': entry.get('durationMs') or 0,
                     'eventKind': entry.get('eventKind', ''),
+                    'eventId': entry.get('eventId', ''),
                     'sessionId': entry.get('sessionId', ''),
                     'messageId': entry.get('messageId', ''),
                     'exitCode': entry.get('exitCode'),
@@ -9629,6 +9829,7 @@ def get_task_activity(task_id):
         'totalDuration': total_duration,
         'runtimeSession': runtime_bindings.get('primary') or {},
         'runtimeSessions': runtime_bindings.get('sessions') or [],
+        'toolRuns': _build_tool_runs(full_activity),
         'stateEvidence': _build_state_evidence(task, ledger_events, full_activity),
         'traceSummary': _build_trace_summary(trace_id, ledger_events, full_activity, outbox_summary),
     }

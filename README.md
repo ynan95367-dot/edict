@@ -173,6 +173,7 @@ CrewAI 和 AutoGen 的 Agent 协作模式是 **"做完就交"**——没有人�
 
 **⚙️ 模型配置 · Models**
 - 每个 Agent 独立切换 LLM
+- 实时检测当前模型可用性、延迟和错误原因
 - 应用后刷新当前 Agent 运行时配置（~5秒生效）
 
 </td><td>
@@ -206,6 +207,33 @@ CrewAI 和 AutoGen 的 Agent 协作模式是 **"做完就交"**——没有人�
 
 </td></tr>
 </table>
+
+---
+
+## ⚙️ 模型配置速查
+
+模型可在看板的 **模型配置** 页面切换；OpenCode 模式也可以直接编辑 `opencode.json` 中各 Agent 的 `model` 字段。推荐按职责分层，而不是所有官员共用同一个模型。
+
+| Agent | 职责 | 推荐模型特征 | 建议参数/策略 |
+|---|---|---|---|
+| `taizi` | 分拣、判断是否建任务 | 快速、低成本、指令跟随稳定 | 低温度；优先响应速度 |
+| `zhongshu` | 规划、拆解、形成方案 | 强推理、长上下文、结构化输出好 | 中低温度；适合高质量模型 |
+| `menxia` | 审核、封驳、风险判断 | 逻辑严谨、保守、擅长找漏洞 | 低温度；开启更严格验收 |
+| `shangshu` | 派发、汇总、调度六部 | 工具调用稳定、上下文整理强 | 中低温度；重视执行可靠性 |
+| `bingbu` / `gongbu` | 代码、脚本、部署、自动化 | 代码能力强、工具调用可靠 | 允许 shell/文件工具，建议配 checkpoint |
+| `xingbu` | 测试、审查、安全 | 擅长测试和异常路径 | 低温度；优先证据和复现命令 |
+| `libu` | 文档、PPT、对外表达 | 中文表达和结构化写作强 | 可适当提高创造性 |
+| `hubu` / `qintianjian` | 数据、成本、趋势 | 表格/数字推理稳定 | 要求输出来源、口径和计算过程 |
+
+常用配置入口：
+
+```bash
+# OpenCode 模式使用哪个运行时模型，可临时覆盖
+OPENCODE_MODEL=provider/model-id bash edict.sh opencode
+
+# 看板优先使用哪个 Python，可避免误选实验版解释器
+EDICT_PYTHON=python3.12 bash edict.sh start
+```
 
 ---
 
@@ -327,6 +355,44 @@ python3 dashboard/server.py     # 看板服务器
 # 打开浏览器
 open http://127.0.0.1:7891
 ```
+
+<details>
+<summary><b>🧭 主控台显示“服务器未启动”？</b></summary>
+
+先在项目目录确认进程和接口：
+
+```bash
+bash edict.sh status
+curl http://127.0.0.1:7891/api/live-status
+```
+
+WSL2 或远程 Linux 上，如果你从宿主机浏览器访问看板，可能需要把看板绑定到所有网卡：
+
+```bash
+EDICT_DASHBOARD_HOST=0.0.0.0 bash edict.sh opencode
+```
+
+如果数据刷新循环未运行，页面可能能打开但状态显示异常。请确认 `openclaw` 或 `opencode` 命令在 PATH 中，并查看 `logs/server.log`、`logs/loop.log` 和 `logs/refresh_watcher.log`。
+
+</details>
+
+<details>
+<summary><b>📜 史官回溯审计</b></summary>
+
+史官审计会重新检查历史 `Done` 任务的产物证据，找出“自述完成但磁盘无产物”的任务。它是只读工具，不会修改任务状态。
+
+```bash
+python3 scripts/shiguan_eval.py
+python3 scripts/shiguan_eval.py --json
+```
+
+执行中的 Agent 标记 `done` 时，也可以用证据闸门加强验收：
+
+```bash
+EDICT_EVIDENCE_GATE=1 python3 scripts/kanban_update.py done JJC-xxx outputs/result.md "完成"
+```
+
+</details>
 
 <details>
 <summary><b>🖥️ 生产环境部署（systemd）</b></summary>

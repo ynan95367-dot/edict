@@ -78,6 +78,7 @@ export function fmtStalled(sec: number): string {
 export function activityKey(a: ActivityEntry): string {
   const at = String(a.at || '');
   if (a.eventId) return `event:${a.eventId}`;
+  if (a.toolRunId) return `tool:${a.kind}:${a.toolRunId}`;
   if (a.kind === 'flow') return ['flow', at, a.from || '', a.to || '', a.remark || ''].join('|');
   if (a.kind === 'progress') return ['progress', at, a.agent || '', a.text || ''].join('|');
   if (a.kind === 'tool_result') return ['tool', at, a.agent || '', a.tool || '', (a.output || '').slice(0, 80)].join('|');

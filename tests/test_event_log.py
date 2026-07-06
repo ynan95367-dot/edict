@@ -296,6 +296,68 @@ def test_opencode_storage_activity_parser(monkeypatch, tmp_path):
     assert any(a['kind'] == 'tool_result' and a.get('output') == 'built' for a in activity)
 
 
+def test_opencode_tool_activity_has_stable_lifecycle_identity(monkeypatch, tmp_path):
+    import server as srv
+
+    storage = tmp_path / 'opencode' / 'storage'
+    (storage / 'session' / 'global').mkdir(parents=True)
+    (storage / 'message' / 'ses_tools').mkdir(parents=True)
+    (storage / 'part' / 'msg_tools').mkdir(parents=True)
+
+    session = {
+        'id': 'ses_tools',
+        'title': 'T-TOOLS runtime trace',
+        'directory': str(ROOT),
+        'time': {'created': 1769835000000, 'updated': 1769835004500},
+    }
+    message = {
+        'id': 'msg_tools',
+        'sessionID': 'ses_tools',
+        'role': 'assistant',
+        'agent': 'gongbu',
+        'time': {'created': 1769835001000},
+    }
+    tool_part = {
+        'id': 'prt_build',
+        'callID': 'call_build',
+        'messageID': 'msg_tools',
+        'type': 'tool',
+        'tool': 'bash',
+        'state': {
+            'status': 'completed',
+            'input': {'command': 'npm run build', 'description': 'Build frontend'},
+            'output': 'built',
+            'metadata': {'exit': 0},
+            'time': {'start': 1769835002000, 'end': 1769835004500},
+        },
+    }
+
+    for path, data in [
+        (storage / 'session' / 'global' / 'ses_tools.json', session),
+        (storage / 'message' / 'ses_tools' / 'msg_tools.json', message),
+        (storage / 'part' / 'msg_tools' / 'prt_build.json', tool_part),
+    ]:
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+
+    monkeypatch.setattr(srv, 'OPENCODE_HOME', tmp_path / 'opencode')
+    monkeypatch.setattr(srv, '_agent_runtime', lambda: 'opencode')
+
+    activity = srv.get_agent_activity('gongbu', task_id='T-TOOLS', limit=10)
+    assistant = next(a for a in activity if a.get('kind') == 'assistant' and a.get('tools'))
+    result = next(a for a in activity if a.get('kind') == 'tool_result')
+    tool = assistant['tools'][0]
+
+    assert tool['toolRunId'] == 'ses_tools:msg_tools:call_build'
+    assert result['toolRunId'] == tool['toolRunId']
+    assert assistant['eventId'] == f"tool_call:{tool['toolRunId']}"
+    assert result['eventId'] == f"tool_result:{tool['toolRunId']}"
+    assert tool['status'] == 'completed'
+    assert result['status'] == 'completed'
+    assert result['durationMs'] == 2500
+    assert tool['inputSummary'] == 'Build frontend'
+    assert result['inputSummary'] == 'Build frontend'
+
+
 def test_opencode_session_error_is_detected(monkeypatch):
     import server as srv
 

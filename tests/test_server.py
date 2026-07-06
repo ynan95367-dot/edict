@@ -1393,12 +1393,27 @@ def test_coding_session_merges_opencode_session_tool_events(tmp_path, monkeypatc
     assert session['runtimeSession']['sessionId'] == session_id
     assert session['runtimeSession']['traceId'] == 'trc_oc'
     assert session['runtimeSession']['status'] == 'bound'
+    activity_data = srv.get_task_activity('JJC-OC-1')
+    tool_runs = activity_data['toolRuns']
+    bash_tool_run = next(run for run in tool_runs if run['toolRunId'] == f'{session_id}:{assistant_msg}:call_bash')
+    assert bash_tool_run['tool'] == 'bash'
+    assert bash_tool_run['status'] == 'completed'
+    assert bash_tool_run['statusLabel'] == '已完成'
+    assert bash_tool_run['inputSummary'] == 'pytest -q tests/test_server.py'
+    assert bash_tool_run['output'] == '1 passed'
+    assert bash_tool_run['exitCode'] == 0
+    assert bash_tool_run['durationMs'] == 100
     files = {f['path']: f for f in session['files']}
     assert files['data/tasks_source.json']['reads'] == 1
     assert files['outputs/weekly-report.md']['changes'] == 1
     assert any(e['kind'] == 'test.run' and 'pytest -q' in e['command'] for e in session['events'])
     assert any(e['kind'] == 'test.result' and e['status'] == 'pass' for e in session['tests'])
     assert any(e['source'] == 'opencode-storage' for e in session['events'])
+    bash_run = next(e for e in session['events'] if e['kind'] == 'test.run')
+    bash_result = next(e for e in session['tests'] if e['kind'] == 'test.result')
+    assert bash_run['meta']['toolRunId'] == f'{session_id}:{assistant_msg}:call_bash'
+    assert bash_result['meta']['toolRunId'] == bash_run['meta']['toolRunId']
+    assert bash_result['meta']['durationMs'] == 100
 
 
 def test_coding_session_merges_opencode_sqlite_tool_events(tmp_path, monkeypatch):
@@ -1725,6 +1740,72 @@ def test_preview_run_spec_includes_tool_policy(tmp_path, monkeypatch):
     assert 'control.wait' in node_ids
     assert 'isolation.prepare' in node_ids
     assert 'capability.shell.command' in node_ids
+
+
+def test_dispatch_events_carry_model_for_broker_signal(monkeypatch):
+    import server as srv
+
+    captured = {}
+
+    def _capture(kind, **kw):
+        captured['kind'] = kind
+        captured['payload'] = kw.get('payload')
+        return 'ok'
+
+    monkeypatch.setattr(srv, '_ledger_append_event', _capture)
+    monkeypatch.setattr(srv, '_agent_current_model', lambda agent_id: 'github-copilot/gpt-5')
+
+    srv._append_runtime_event('dispatch_succeeded', task_id='T', agent_id='gongbu',
+                              payload={'status': 'success'})
+    assert captured['payload']['model'] == 'github-copilot/gpt-5'
+
+
+def test_non_dispatch_events_are_not_enriched_with_model(monkeypatch):
+    import server as srv
+
+    captured = {}
+    monkeypatch.setattr(srv, '_ledger_append_event',
+                        lambda kind, **kw: captured.update(payload=kw.get('payload')))
+    monkeypatch.setattr(srv, '_agent_current_model', lambda agent_id: 'should-not-appear')
+
+    srv._append_runtime_event('state_changed', task_id='T', agent_id='gongbu', payload={'x': 1})
+    assert 'model' not in captured['payload']
+
+
+def test_run_spec_compiles_acceptance_contract_for_coding(tmp_path, monkeypatch):
+    import server as srv
+
+    data = tmp_path / 'data'
+    data.mkdir()
+    monkeypatch.setattr(srv, 'DATA', data)
+
+    result = srv.preview_run_spec({
+        'goal': '运行 pytest 检查当前仓库并修复前端构建问题',
+        'mode': 'execute',
+        'deliverable': '补丁和验证结果',
+    })
+
+    run = result['run']
+    assert 'acceptance' in run
+    types = {p['type'] for p in run['acceptance']}
+    assert 'diff_nonempty' in types  # a code change must produce a real diff
+
+
+def test_run_spec_acceptance_is_empty_for_plan(tmp_path, monkeypatch):
+    import server as srv
+
+    data = tmp_path / 'data'
+    data.mkdir()
+    monkeypatch.setattr(srv, 'DATA', data)
+
+    result = srv.preview_run_spec({
+        'goal': '先调研三种方案的优劣并给出建议，先不要执行',
+        'mode': 'plan',
+    })
+
+    run = result['run']
+    # A plan produces an argument, not an on-disk artifact: nothing to verify.
+    assert run['acceptance'] == []
 
 
 def test_allocate_task_worktree_creates_dedicated_git_worktree(tmp_path, monkeypatch):

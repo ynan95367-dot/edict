@@ -13,8 +13,9 @@ import { DispatchChannelPanel } from './model-config/DispatchChannelPanel';
 import { ModelChangeLogPanel } from './model-config/ModelChangeLogPanel';
 import { ModelHealthPanel } from './model-config/ModelHealthPanel';
 import { ModelRegistryPanel } from './model-config/ModelRegistryPanel';
+import { ModelSpeedPanel } from './model-config/ModelSpeedPanel';
 import type { CustomModelDraft } from './model-config/ManualApiModelForm';
-import { buildRegistryOptions, sortRegistryModels } from './model-config/modelConfigUtils';
+import { buildCurrentModelIds, buildRegistryOptions, sortRegistryModels } from './model-config/modelConfigUtils';
 
 export default function ModelConfig() {
   const agentConfig = useStore((s) => s.agentConfig);
@@ -36,6 +37,7 @@ export default function ModelConfig() {
   const [probeError, setProbeError] = useState('');
   const [probeLoading, setProbeLoading] = useState('');
   const [modelQuery, setModelQuery] = useState('');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [customModel, setCustomModel] = useState<CustomModelDraft>({
     providerId: 'openrouter',
     providerName: 'OpenRouter',
@@ -53,8 +55,10 @@ export default function ModelConfig() {
       const data = await api.modelHealth();
       setHealth(data);
       setHealthError('');
+      return data;
     } catch {
       setHealthError('模型健康接口不可达');
+      return null;
     } finally {
       setHealthLoading(false);
     }
@@ -70,8 +74,10 @@ export default function ModelConfig() {
         await loadAgentConfig();
         await loadHealth();
       }
+      return data;
     } catch {
       setRegistryError('模型注册表接口不可达');
+      return null;
     } finally {
       setRegistryLoading(false);
     }
@@ -82,8 +88,10 @@ export default function ModelConfig() {
       const data = await api.modelProbes();
       setProbe(data);
       setProbeError('');
+      return data;
     } catch {
       setProbeError('模型观测接口不可达');
+      return null;
     }
   };
 
@@ -95,14 +103,15 @@ export default function ModelConfig() {
   }, [loadAgentConfig]);
 
   useEffect(() => {
-    const active = Boolean(probe?.running || probe?.observerRunning || probe?.config?.enabled);
+    const running = Boolean(probe?.running);
+    const continuous = Boolean(probe?.observerRunning || probe?.config?.enabled);
+    const intervalMs = running ? 3000 : continuous ? 10000 : 30000;
     const timer = window.setInterval(async () => {
-      await loadProbes();
-      if (active) {
-        await loadRegistry(false);
-        await loadHealth();
+      const nextProbe = await loadProbes();
+      if (running || nextProbe?.running) {
+        await Promise.all([loadRegistry(false), loadHealth()]);
       }
-    }, active ? 5000 : 20000);
+    }, intervalMs);
     return () => window.clearInterval(timer);
   }, [probe?.running, probe?.observerRunning, probe?.config?.enabled]);
 
@@ -153,15 +162,7 @@ export default function ModelConfig() {
   }, [registry, modelQuery]);
 
   const currentAgentModelIds = useMemo(() => {
-    const seen = new Set<string>();
-    const ids: string[] = [];
-    agentConfig?.agents?.forEach((ag) => {
-      const id = (ag.model || ag.defaultModel || '').trim();
-      if (!id || seen.has(id)) return;
-      seen.add(id);
-      ids.push(id);
-    });
-    return ids;
+    return buildCurrentModelIds(agentConfig);
   }, [agentConfig]);
 
   if (!agentConfig?.agents) {
@@ -282,57 +283,90 @@ export default function ModelConfig() {
 
   return (
     <div>
-      <ModelRegistryPanel
+      <ModelSpeedPanel
+        agentConfig={agentConfig}
         registry={registry}
+        health={health}
+        probe={probe}
         registryLoading={registryLoading}
         registryError={registryError}
-        probe={probe}
         probeError={probeError}
         probeLoading={probeLoading}
         modelQuery={modelQuery}
-        models={models}
         visibleRegistryModels={visibleRegistryModels}
-        customModel={customModel}
-        customStatus={customStatus}
         onRefreshRegistry={refreshRegistry}
         onRunProbe={runProbe}
         onToggleContinuousProbe={toggleContinuousProbe}
         onModelQueryChange={setModelQuery}
-        onCustomChange={(key, value) => setCustomModel((prev) => ({ ...prev, [key]: value }))}
-        onCustomSubmit={submitCustom}
       />
 
-      <ModelHealthPanel
-        agentConfig={agentConfig}
-        health={health}
-        healthByAgent={healthByAgent}
-        healthError={healthError}
-        healthLoading={healthLoading}
-        onRefresh={loadHealth}
-      />
+      <details
+        className="model-advanced"
+        open={advancedOpen}
+        onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
+      >
+        <summary>
+          <span>高级设置</span>
+          <b>模型分配、手动 API、原始注册表、交办渠道和历史记录</b>
+          <em>{advancedOpen ? '收起' : '展开'}</em>
+        </summary>
 
-      <AgentModelGrid
-        agentConfig={agentConfig}
-        models={models}
-        selMap={selMap}
-        statusMap={statusMap}
-        healthByAgent={healthByAgent}
-        registryById={registryById}
-        onSelect={(agentId, value) => setSelMap((prev) => ({ ...prev, [agentId]: value }))}
-        onApply={applyModel}
-        onReset={resetModelSelection}
-      />
+        {advancedOpen && (
+          <div className="model-advanced-body">
+            <ModelHealthPanel
+              agentConfig={agentConfig}
+              health={health}
+              healthByAgent={healthByAgent}
+              healthError={healthError}
+              healthLoading={healthLoading}
+              onRefresh={loadHealth}
+            />
 
-      <DispatchChannelPanel
-        channelSel={channelSel}
-        currentChannel={agentConfig.dispatchChannel}
-        channelStatus={channelStatus}
-        isOpenCodeRuntime={isOpenCodeRuntime}
-        onSelect={setChannelSel}
-        onApply={applyDispatchChannel}
-      />
+            <AgentModelGrid
+              agentConfig={agentConfig}
+              models={models}
+              selMap={selMap}
+              statusMap={statusMap}
+              healthByAgent={healthByAgent}
+              registryById={registryById}
+              onSelect={(agentId, value) => setSelMap((prev) => ({ ...prev, [agentId]: value }))}
+              onApply={applyModel}
+              onReset={resetModelSelection}
+            />
 
-      <ModelChangeLogPanel changeLog={changeLog} />
+            <ModelRegistryPanel
+              registry={registry}
+              registryLoading={registryLoading}
+              registryError={registryError}
+              probe={probe}
+              probeError={probeError}
+              probeLoading={probeLoading}
+              modelQuery={modelQuery}
+              models={models}
+              visibleRegistryModels={visibleRegistryModels}
+              customModel={customModel}
+              customStatus={customStatus}
+              onRefreshRegistry={refreshRegistry}
+              onRunProbe={runProbe}
+              onToggleContinuousProbe={toggleContinuousProbe}
+              onModelQueryChange={setModelQuery}
+              onCustomChange={(key, value) => setCustomModel((prev) => ({ ...prev, [key]: value }))}
+              onCustomSubmit={submitCustom}
+            />
+
+            <DispatchChannelPanel
+              channelSel={channelSel}
+              currentChannel={agentConfig.dispatchChannel}
+              channelStatus={channelStatus}
+              isOpenCodeRuntime={isOpenCodeRuntime}
+              onSelect={setChannelSel}
+              onApply={applyDispatchChannel}
+            />
+
+            <ModelChangeLogPanel changeLog={changeLog} />
+          </div>
+        )}
+      </details>
     </div>
   );
 }

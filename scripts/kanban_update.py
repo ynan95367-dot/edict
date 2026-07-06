@@ -60,6 +60,27 @@ except Exception:  # pragma: no cover - outbox must not break kanban writes
     _outbox_enqueue_handoff = None
 
 try:
+    import evidence_gate as _evidence_gate  # noqa: E402
+except Exception:  # pragma: no cover - gate must never break kanban writes
+    _evidence_gate = None
+
+# 证据收口闸门：开启后，收口（done）必须先用磁盘事实通过验收契约，否则驳回。
+# 默认 OFF —— 即便关闭也会照常计算并写入证据，先采集信号、不阻断生产收口。
+EVIDENCE_GATE_ENFORCE = os.environ.get('EDICT_EVIDENCE_GATE', '').strip().lower() in ('1', 'true', 'on', 'yes')
+
+
+def _evaluate_evidence_gate(task, output_path):
+    """从磁盘重新核验"完成"。返回闸门结果 dict，或 None（不可用/异常时绝不阻断）。"""
+    if _evidence_gate is None:
+        return None
+    try:
+        root = task.get('worktree') or task.get('repoDir') or str(_BASE)
+        return _evidence_gate.gate(task, output_path or '', root)
+    except Exception as exc:  # pragma: no cover - defensive: never break收口
+        log.warning(f'证据闸门评估异常（已忽略，不阻断）：{exc}')
+        return None
+
+try:
     from edict.control_plane import (  # noqa: E402
         AGENT_LABELS as CONTROL_AGENT_LABELS,
         ORG_AGENT_MAP as CONTROL_ORG_AGENT_MAP,
@@ -701,6 +722,7 @@ def cmd_done(task_id, output_path='', summary=''):
     reject_reason = ['']
     done_payload = [{}]
     handoff_task = [None]
+    gate_result = [None]
     def modifier(tasks):
         t = find_task(tasks, task_id)
         if not t:
@@ -716,6 +738,16 @@ def cmd_done(task_id, output_path='', summary=''):
         if total > 0 and completed < total:
             rejected[0] = True
             reject_reason[0] = f'todos 未完成（{completed}/{total}），禁止直接收口'
+            done_payload[0] = {'oldState': old_state, 'newState': 'Review'}
+            return tasks
+
+        # 证据收口闸门：用磁盘事实重新推导"是否完成"，而不是相信 Agent 自述。
+        # 闸门结果始终计算并随事件入账；仅在 enforce 开启时才真正驳回。
+        gate_result[0] = _evaluate_evidence_gate(t, output_path)
+        if EVIDENCE_GATE_ENFORCE and gate_result[0] and not gate_result[0].get('ok', True):
+            rejected[0] = True
+            failed = '、'.join(gate_result[0].get('failed') or []) or '验收契约未满足'
+            reject_reason[0] = f'证据收口未通过：{failed}'
             done_payload[0] = {'oldState': old_state, 'newState': 'Review'}
             return tasks
 
@@ -760,12 +792,12 @@ def cmd_done(task_id, output_path='', summary=''):
         _append_runtime_event('state_rejected', task_id, agent_id, {
             **done_payload[0],
             'reason': reject_reason[0],
-        }, confidence='high')
+        }, evidence=gate_result[0], confidence='high')
         return
     log.info(f'✅ {task_id} 执行完成，已提交尚书省审查')
     agent_id = _infer_agent_id_from_runtime()
     _append_audit(task_id, agent_id, 'done', None, 'Review', summary or '')
-    _append_runtime_event('task_done', task_id, agent_id, done_payload[0], at=done_payload[0].get('at'), trace_id=(handoff_task[0] or {}).get('traceId', ''))
+    _append_runtime_event('task_done', task_id, agent_id, done_payload[0], evidence=gate_result[0], at=done_payload[0].get('at'), trace_id=(handoff_task[0] or {}).get('traceId', ''))
     _enqueue_state_handoff(task_id, handoff_task[0], done_payload[0].get('oldState', ''), 'Review', 'kanban-done')
 
 

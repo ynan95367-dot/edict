@@ -942,16 +942,58 @@ export interface ActivityEntry {
   from?: string;
   to?: string;
   remark?: string;
-  tools?: { name: string; input_preview?: string; input?: Record<string, unknown> }[];
+  tools?: ActivityToolCall[];
+  toolRunId?: string;
   tool?: string;
   output?: string;
   exitCode?: number | null;
+  path?: string;
+  command?: string;
+  status?: string;
+  statusLabel?: string;
+  durationMs?: number;
+  inputSummary?: string;
+  messageId?: string;
+  sessionId?: string;
   items?: TodoItem[];
   diff?: {
     changed?: { id: string; from: string; to: string }[];
     added?: { id: string; title: string }[];
     removed?: { id: string; title: string }[];
   };
+}
+
+export interface ActivityToolCall {
+  name: string;
+  input_preview?: string;
+  inputSummary?: string;
+  input?: Record<string, unknown>;
+  callId?: string;
+  toolRunId?: string;
+  status?: string;
+  statusLabel?: string;
+  path?: string;
+  command?: string;
+}
+
+export interface ActivityToolRun {
+  toolRunId: string;
+  tool: string;
+  agent?: string;
+  status?: string;
+  statusLabel?: string;
+  inputSummary?: string;
+  output?: string;
+  exitCode?: number | null;
+  durationMs?: number;
+  path?: string;
+  command?: string;
+  startedAt?: string;
+  endedAt?: string;
+  source?: string;
+  sessionId?: string;
+  messageId?: string;
+  eventIds?: string[];
 }
 
 export interface CodingEvent {
@@ -1167,6 +1209,7 @@ export interface TaskActivityData {
   resourceSummary?: ResourceSummary;
   runtimeSession?: RuntimeSessionBinding;
   runtimeSessions?: RuntimeSessionBinding[];
+  toolRuns?: ActivityToolRun[];
   stateEvidence?: StateEvidence;
   traceSummary?: TraceSummary;
 }
