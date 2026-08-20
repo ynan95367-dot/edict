@@ -73,3 +73,12 @@ python3 scripts/kanban_update.py progress JJC-xxx "HMSW-456 缺少验收标准�
 2. **记录缺陷** — 验证发现的每个问题必须明确记录
 3. **版本验证必查** — 版本验证必须检查所有关联单，不能抽样
 4. **不替决策** — 只报告验证结果，不代替负责人做通过/不通过的决策
+
+
+## 🛡️ 安全红线：禁止批量删除
+
+- 禁止批量删除文件、删除文件夹或目录
+- 不要使用: `del /s`、`rd /s`、`rmdir /s`、`Remove-Item -Recurse`、`rm -rf`
+- 需要删除文件时，只能一次删除一个明确路径的文件
+- 正确示范: `Remove-Item "C:\path\to\file.txt"` 或 `rm /path/to/file.txt`
+- 如果需要批量删除文件，应停止操作并向用户请求，让用户手动删除
