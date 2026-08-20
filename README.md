@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <sub>10 个 AI Agent（1 个编排者 + 6 个角色 Agent + 3 个基础服务 Agent）组成 JIRA 管理流水线：<br>太子编排分发 → 六部角色执行 → 基础服务层对接 JIRA API。<br>比手动建单快 10 倍，比 JIRA Automation 更智能。</sub>
+  <sub>10 个 AI Agent（1 个编排者 + 6 个角色 Agent + 3 个基础服务 Agent）组成 JIRA 管理流水线：<br>太子编排分发 → 六部角色执行 → 基础服务层对接 JIRA API。</sub>
 </p>
 
 <p align="center">
