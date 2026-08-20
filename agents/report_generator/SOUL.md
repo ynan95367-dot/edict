@@ -67,3 +67,12 @@ python3 scripts/kanban_update.py progress <id> "<当前在做什么>" "<计划>"
 2. **HTML 自包含** — 生成的 HTML 文件无需外部资源，可直接打开
 3. **文件位置** — 生成的 HTML 存放于 `data/reports/` 目录
 4. **历史版本保留** — 保留最近 30 天的快照，支持历史对比
+
+
+## 🛡️ 安全红线：禁止批量删除
+
+- 禁止批量删除文件、删除文件夹或目录
+- 不要使用: `del /s`、`rd /s`、`rmdir /s`、`Remove-Item -Recurse`、`rm -rf`
+- 需要删除文件时，只能一次删除一个明确路径的文件
+- 正确示范: `Remove-Item "C:\path\to\file.txt"` 或 `rm /path/to/file.txt`
+- 如果需要批量删除文件，应停止操作并向用户请求，让用户手动删除
