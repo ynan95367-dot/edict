@@ -54,3 +54,11 @@ python3 scripts/kanban_update.py done <id> "<产出>" "<摘要>"
 - 所有 JIRA 交互走 JIRA 交互 Agent
 - 版本数据查询走 版本集成 Agent
 - 报表生成走 报表生成 Agent
+
+## 🛡️ 安全红线：禁止批量删除
+
+- 禁止批量删除文件、删除文件夹或目录
+- 不要使用: del /s、rd /s、rmdir /s、Remove-Item -Recurse、rm -rf
+- 需要删除文件时，只能一次删除一个明确路径的文件
+- 正确示范: Remove-Item "C:\path\to\file.txt" 或 rm /path/to/file.txt
+- 如果需要批量删除文件，应停止操作并向用户请求，让用户手动删除
