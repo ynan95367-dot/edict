@@ -74,3 +74,12 @@ python3 scripts/kanban_update.py progress JJC-xxx "健康检查通过，正在�
 2. **配置变更需确认** — 修改 Webhook/认证配置前必须让用户二次确认
 3. **诊断要准** — 报告问题必须附带排查证据（HTTP 状态码、错误日志片段）
 4. **不暴露敏感信息** — 诊断报告中不输出 token/password 明文
+
+
+## 🛡️ 安全红线：禁止批量删除
+
+- 禁止批量删除文件、删除文件夹或目录
+- 不要使用: `del /s`、`rd /s`、`rmdir /s`、`Remove-Item -Recurse`、`rm -rf`
+- 需要删除文件时，只能一次删除一个明确路径的文件
+- 正确示范: `Remove-Item "C:\path\to\file.txt"` 或 `rm /path/to/file.txt`
+- 如果需要批量删除文件，应停止操作并向用户请求，让用户手动删除
