@@ -1,0 +1,92 @@
+[
+  {
+    "id": "taizi",
+    "name": "taizi",
+    "workspace": "/home/lenovo/.openclaw/workspace-taizi",
+    "agentDir": "/home/lenovo/.openclaw/agents/taizi/agent",
+    "subagents": {
+      "allowAgents": ["hubu", "libu", "bingbu", "xingbu", "gongbu", "libu_hr"]
+    }
+  },
+  {
+    "id": "hubu",
+    "name": "hubu",
+    "workspace": "/home/lenovo/.openclaw/workspace-hubu",
+    "agentDir": "/home/lenovo/.openclaw/agents/hubu/agent",
+    "subagents": {
+      "allowAgents": ["jira_bridge", "version_integrator"]
+    }
+  },
+  {
+    "id": "libu",
+    "name": "libu",
+    "workspace": "/home/lenovo/.openclaw/workspace-libu",
+    "agentDir": "/home/lenovo/.openclaw/agents/libu/agent",
+    "subagents": {
+      "allowAgents": ["jira_bridge"]
+    }
+  },
+  {
+    "id": "bingbu",
+    "name": "bingbu",
+    "workspace": "/home/lenovo/.openclaw/workspace-bingbu",
+    "agentDir": "/home/lenovo/.openclaw/agents/bingbu/agent",
+    "subagents": {
+      "allowAgents": ["jira_bridge"]
+    }
+  },
+  {
+    "id": "xingbu",
+    "name": "xingbu",
+    "workspace": "/home/lenovo/.openclaw/workspace-xingbu",
+    "agentDir": "/home/lenovo/.openclaw/agents/xingbu/agent",
+    "subagents": {
+      "allowAgents": ["jira_bridge", "version_integrator"]
+    }
+  },
+  {
+    "id": "gongbu",
+    "name": "gongbu",
+    "workspace": "/home/lenovo/.openclaw/workspace-gongbu",
+    "agentDir": "/home/lenovo/.openclaw/agents/gongbu/agent",
+    "subagents": {
+      "allowAgents": ["jira_bridge"]
+    }
+  },
+  {
+    "id": "libu_hr",
+    "name": "libu_hr",
+    "workspace": "/home/lenovo/.openclaw/workspace-libu_hr",
+    "agentDir": "/home/lenovo/.openclaw/agents/libu_hr/agent",
+    "subagents": {
+      "allowAgents": ["jira_bridge", "version_integrator", "report_generator"]
+    }
+  },
+  {
+    "id": "jira_bridge",
+    "name": "jira_bridge",
+    "workspace": "/home/lenovo/.openclaw/workspace-jira_bridge",
+    "agentDir": "/home/lenovo/.openclaw/agents/jira_bridge/agent",
+    "subagents": {
+      "allowAgents": []
+    }
+  },
+  {
+    "id": "version_integrator",
+    "name": "version_integrator",
+    "workspace": "/home/lenovo/.openclaw/workspace-version_integrator",
+    "agentDir": "/home/lenovo/.openclaw/agents/version_integrator/agent",
+    "subagents": {
+      "allowAgents": []
+    }
+  },
+  {
+    "id": "report_generator",
+    "name": "report_generator",
+    "workspace": "/home/lenovo/.openclaw/workspace-report_generator",
+    "agentDir": "/home/lenovo/.openclaw/agents/report_generator/agent",
+    "subagents": {
+      "allowAgents": []
+    }
+  }
+]
