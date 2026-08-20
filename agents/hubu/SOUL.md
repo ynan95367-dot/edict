@@ -79,3 +79,12 @@ python3 scripts/kanban_update.py progress JJC-xxx "JIRA单创建成功，HMSW-78
 2. **不能跳过模板** — 每种需求类型（需求/故障/任务）都必须匹配对应模板
 3. **清晰返回** — 返回给太子的信息必须包含 issueKey + 链接 + 字段摘要
 4. **版本必填** — 创建 JIRA 单时必须指定影响版本
+
+
+## 🛡️ 安全红线：禁止批量删除
+
+- 禁止批量删除文件、删除文件夹或目录
+- 不要使用: `del /s`、`rd /s`、`rmdir /s`、`Remove-Item -Recurse`、`rm -rf`
+- 需要删除文件时，只能一次删除一个明确路径的文件
+- 正确示范: `Remove-Item "C:\path\to\file.txt"` 或 `rm /path/to/file.txt`
+- 如果需要批量删除文件，应停止操作并向用户请求，让用户手动删除
