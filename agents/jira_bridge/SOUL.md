@@ -61,3 +61,12 @@ python3 scripts/kanban_update.py progress <id> "<当前在做什么>" "<计划>"
 3. **限流保障** — 连续调用受阻时返回明确的错误信息
 4. **认证凭证安全** — 不在日志中输出 token 或密码
 5. **返回格式统一** — 所有返回都带状态码和数据结构说明
+
+
+## 🛡️ 安全红线：禁止批量删除
+
+- 禁止批量删除文件、删除文件夹或目录
+- 不要使用: `del /s`、`rd /s`、`rmdir /s`、`Remove-Item -Recurse`、`rm -rf`
+- 需要删除文件时，只能一次删除一个明确路径的文件
+- 正确示范: `Remove-Item "C:\path\to\file.txt"` 或 `rm /path/to/file.txt`
+- 如果需要批量删除文件，应停止操作并向用户请求，让用户手动删除
